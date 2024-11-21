@@ -25,6 +25,8 @@ from pathlib import Path
 if TYPE_CHECKING:
     import napari
 
+IGNORE_PROPERTIES = ['zarr_url', 'channel', 'channels_to_include', 'channels_to_exclude', 'measure_texture']
+
 def abspath(root, relpath):
     root = Path(root)
     if root.is_dir():
@@ -80,8 +82,8 @@ class OMEZarrTaskManager:
         title = self.tasks[name]['title']
         path_to_json = os.path.join(parent_dir, f'{title}.json')
 
-        if self.tasks[name]['properties']['label_name']['value'] == "":
-            self.tasks[name]['properties']['label_name']['value'] = f"{self.tasks[name]['properties']['channel']['value']}_{self.tasks[name]['title']}"
+        # if self.tasks[name]['properties']['label_name']['value'] == "":
+        #     self.tasks[name]['properties']['label_name']['value'] = f"{self.tasks[name]['properties']['channel']['value']}_{self.tasks[name]['title']}"
 
         args_dict = dict()
         for prop_key in self.tasks[name]['properties'].keys():
@@ -101,8 +103,10 @@ class OMEZarrTaskManager:
                              value):
 
         print('Property dict updated', name, property, value)
-
-        self.tasks[name]['properties'][property]['value'] = value
+        try:
+            self.tasks[name]['properties'][property]['value'] = value
+        except KeyError:
+            print(f'Property {property} not defined in MANIFEST')
 
     def add_widget_dict(self,
                         name,
@@ -240,15 +244,16 @@ class TasksQWidget(QWidget):
 
     def _execute_task(self, task_name):
 
-        for property in ['threshold', 'label_name', 'min_size', 'overwrite']:
-            value = self.task_manager.get_widget_value(task_name, property)
-            self.task_manager.update_task_property(task_name, property, value)
-
-
         selected_layer = self._viewer.layers[self._image_layers.currentText()]
         path_to_zarr = selected_layer.source.path
         self.task_manager.update_task_property(task_name, 'zarr_url', path_to_zarr)
         self.task_manager.update_task_property(task_name, 'channel', self._image_layers.currentText())
+
+        task_properties = self.task_manager.get_properties(task_name)
+        for property in [k for k in task_properties.keys() if k not in IGNORE_PROPERTIES]:
+        # for property in ['threshold', 'label_name', 'min_size', 'overwrite']:
+            value = self.task_manager.get_widget_value(task_name, property)
+            self.task_manager.update_task_property(task_name, property, value)
 
         # Since the output is written to the Zarr file, remove the layer containing the zarr and reload it again once the process is finished
 
@@ -261,24 +266,26 @@ class TasksQWidget(QWidget):
         p.wait()
 
         # Remove and reload zarr
-        props = self.task_manager.get_properties(task_name)
-        out_layer_name = props['label_name']['value']
+        # Future MANIFESTS should include output type
+        if task_name == 'Thresholding Label Task':
+            props = self.task_manager.get_properties(task_name)
+            out_layer_name = props['label_name']['value']
 
 
 
-        for layer in self._viewer.layers:
-            if isinstance(layer, napari.layers.Labels):
-                self._viewer.layers.remove(layer.name)
+            for layer in self._viewer.layers:
+                if isinstance(layer, napari.layers.Labels):
+                    self._viewer.layers.remove(layer.name)
 
 
-        zarr_layer_data = napari_get_reader(os.path.join(path_to_zarr))()
-        for layer_data in zarr_layer_data:
-            if layer_data[-1] == 'labels':
-                layer = napari.layers.Layer.create(*layer_data)
-                print(out_layer_name, layer.name)
-                if layer.name == out_layer_name:
-                    layer.visible = True
-                    self._viewer.add_layer(layer)
+            zarr_layer_data = napari_get_reader(os.path.join(path_to_zarr))()
+            for layer_data in zarr_layer_data:
+                if layer_data[-1] == 'labels':
+                    layer = napari.layers.Layer.create(*layer_data)
+                    print(out_layer_name, layer.name)
+                    if layer.name == out_layer_name:
+                        layer.visible = True
+                        self._viewer.add_layer(layer)
 
     def _add_task_tab(self):
 
@@ -291,7 +298,7 @@ class TasksQWidget(QWidget):
 
         widget_dict = dict()
         for prop_key in task_properties.keys():
-            if 'type' in task_properties[prop_key].keys() and prop_key not in ['zarr_url']:
+            if 'type' in task_properties[prop_key].keys() and prop_key not in IGNORE_PROPERTIES:
                 object_name = f'{task_name}+{prop_key}'
 
                 if task_properties[prop_key]['type'] == "integer":
