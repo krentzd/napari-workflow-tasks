@@ -18,17 +18,8 @@ contributions:
     - id: napari-workflow-tasks.make_sample_data
       python_name: napari_workflow_tasks._sample_data:make_sample_data
       title: Load sample data from Napari workflow tasks
-    - id: napari-workflow-tasks.make_container_widget
-      python_name: napari_workflow_tasks:ImageThreshold
-      title: Make threshold Container widget
-    - id: napari-workflow-tasks.make_magic_widget
-      python_name: napari_workflow_tasks:threshold_magic_widget
-      title: Make threshold magic widget
-    - id: napari-workflow-tasks.make_function_widget
-      python_name: napari_workflow_tasks:threshold_autogenerate_widget
-      title: Make threshold function widget
     - id: napari-workflow-tasks.make_qwidget
-      python_name: napari_workflow_tasks:ExampleQWidget
+      python_name: napari_workflow_tasks:TasksQWidget
       title: Make example QWidget
   readers:
     - command: napari-workflow-tasks.get_reader
@@ -46,12 +37,5 @@ contributions:
       display_name: Napari workflow tasks
       key: unique_id.1
   widgets:
-    - command: napari-workflow-tasks.make_container_widget
-      display_name: Container Threshold
-    - command: napari-workflow-tasks.make_magic_widget
-      display_name: Magic Threshold
-    - command: napari-workflow-tasks.make_function_widget
-      autogenerate: true
-      display_name: Autogenerate Threshold
     - command: napari-workflow-tasks.make_qwidget
-      display_name: Example QWidget
+      display_name: OME Tasks

@@ -29,100 +29,201 @@ References:
 Replace code below according to your needs.
 """
 from typing import TYPE_CHECKING
-
 from magicgui import magic_factory
 from magicgui.widgets import CheckBox, Container, create_widget
-from qtpy.QtWidgets import QHBoxLayout, QPushButton, QWidget
+from qtpy.QtWidgets import (QHBoxLayout, QPushButton, QWidget, QTabWidget,
+                            QTableWidget, QVBoxLayout, QAbstractItemView, QLabel,
+                            QLineEdit, QTabBar, QFileDialog, QCheckBox, QComboBox)
 from skimage.util import img_as_float
+import json
+
+import subprocess
+import os
+import napari
+
+from ome_zarr.reader import Reader
+from ome_zarr.io import parse_url
+from ome_zarr.types import LayerData
+
+from napari_ome_zarr._reader import napari_get_reader
 
 if TYPE_CHECKING:
     import napari
 
+class TaskManager:
+    # Manage tasks by keeping track of what each tab contains and what executable it links to
+    def __init__(self, tab_id):
+        self.tab_id = tab_id
 
-# Uses the `autogenerate: true` flag in the plugin manifest
-# to indicate it should be wrapped as a magicgui to autogenerate
-# a widget.
-def threshold_autogenerate_widget(
-    img: "napari.types.ImageData",
-    threshold: "float",
-) -> "napari.types.LabelsData":
-    return img_as_float(img) > threshold
+    def parameters(self):
+        pass
 
+    def execute(self):
+        pass
 
-# the magic_factory decorator lets us customize aspects of our widget
-# we specify a widget type for the threshold parameter
-# and use auto_call=True so the function is called whenever
-# the value of a parameter changes
-@magic_factory(
-    threshold={"widget_type": "FloatSlider", "max": 1}, auto_call=True
-)
-def threshold_magic_widget(
-    img_layer: "napari.layers.Image", threshold: "float"
-) -> "napari.types.LabelsData":
-    return img_as_float(img_layer.data) > threshold
-
-
-# if we want even more control over our widget, we can use
-# magicgui `Container`
-class ImageThreshold(Container):
-    def __init__(self, viewer: "napari.viewer.Viewer"):
-        super().__init__()
-        self._viewer = viewer
-        # use create_widget to generate widgets from type annotations
-        self._image_layer_combo = create_widget(
-            label="Image", annotation="napari.layers.Image"
-        )
-        self._threshold_slider = create_widget(
-            label="Threshold", annotation=float, widget_type="FloatSlider"
-        )
-        self._threshold_slider.min = 0
-        self._threshold_slider.max = 1
-        # use magicgui widgets directly
-        self._invert_checkbox = CheckBox(text="Keep pixels below threshold")
-
-        # connect your own callbacks
-        self._threshold_slider.changed.connect(self._threshold_im)
-        self._invert_checkbox.changed.connect(self._threshold_im)
-
-        # append into/extend the container with your widgets
-        self.extend(
-            [
-                self._image_layer_combo,
-                self._threshold_slider,
-                self._invert_checkbox,
-            ]
-        )
-
-    def _threshold_im(self):
-        image_layer = self._image_layer_combo.value
-        if image_layer is None:
-            return
-
-        image = img_as_float(image_layer.data)
-        name = image_layer.name + "_thresholded"
-        threshold = self._threshold_slider.value
-        if self._invert_checkbox.value:
-            thresholded = image < threshold
-        else:
-            thresholded = image > threshold
-        if name in self._viewer.layers:
-            self._viewer.layers[name].data = thresholded
-        else:
-            self._viewer.add_labels(thresholded, name=name)
-
-
-class ExampleQWidget(QWidget):
+class TasksQWidget(QWidget):
     # your QWidget.__init__ can optionally request the napari viewer instance
     # use a type annotation of 'napari.viewer.Viewer' for any parameter
-    def __init__(self, viewer: "napari.viewer.Viewer"):
+    def __init__(self, napari_viewer):
         super().__init__()
-        self.viewer = viewer
+        self._viewer = napari_viewer
 
-        btn = QPushButton("Click me!")
-        btn.clicked.connect(self._on_click)
+        self.exec_dict = dict()
+        ### Dictionary of TaskManager
+        self.task_manager_dict = dict()
+
+        ### Core widget components
+        self.main_container = QWidget()
+        self.tab_container = QTabWidget()
+
+        ### Container to select napari layer
+        image_input_container = QWidget()
+        image_input_container.setLayout(QHBoxLayout())
+        image_input_label = QLabel('Image')
+        image_input_container.layout().addWidget(image_input_label)
+        self._image_layers = QComboBox(self)
+        image_input_container.layout().addWidget(self._image_layers)
+        image_input_container.layout().setSpacing(0)
+
+
+        ### Container to add more tabs with tasks
+        task_adder_container = QWidget()
+        task_adder_container.setLayout(QHBoxLayout())
+        task_adder_container.layout().addWidget(QLabel("Task name"))
+
+        self.task_adder_btn = QPushButton("Add task")
+        self.task_adder_btn.clicked.connect(self._add_task_tab)
+        task_adder_container.layout().addWidget(self.task_adder_btn)
+
+        ### Main container
+        self.main_container.setLayout(QVBoxLayout())
+        self.main_container.layout().addWidget(image_input_container)
+        self.main_container.layout().addWidget(task_adder_container)
+
+        ### Tasks container
+        self.tab_container.addTab(self.main_container, "Main")
 
         self.setLayout(QHBoxLayout())
-        self.layout().addWidget(btn)
+        self.layout().addWidget(self.tab_container)
 
-    def _on_click(self):
-        print("napari has", len(self.viewer.layers), "layers")
+        self._update_combo_boxes()
+
+    def _update_combo_boxes(self):
+        for layer_name in [self._image_layers.itemText(i) for i in range(self._image_layers.count())]:
+            layer_name_index = self._image_layers.findText(layer_name)
+            self._image_layers.removeItem(layer_name_index)
+
+        for layer in [l for l in self._viewer.layers if isinstance(l, napari.layers.Image)]:
+            if layer.name not in [self._image_layers.itemText(i) for i in range(self._image_layers.count())]:
+                self._image_layers.addItem(layer.name)
+
+
+    def _select_task_file(self):
+        return QFileDialog().getOpenFileName(self, "Select task file", ".",
+                                             "Task specs (*.json)")[0]
+
+    def _task_widget_maker(self, task_name, task_key, **kwargs):
+        title = kwargs.get("title", "Task")
+        type = kwargs.get("type", None)
+        print(kwargs)
+        print(type)
+        _container = QWidget()
+        _container.setLayout(QHBoxLayout())
+        _container.layout().addWidget(QLabel(title))
+
+        if type == "integer":
+            _widget = QLineEdit(objectName=f"{task_name}+{task_key}+{title}")
+            # _widget.setValidator(QIntValidator)
+        elif type == "string":
+            _widget = QLineEdit(objectName=f"{task_name}+{task_key}+{title}")
+        elif type == "boolean":
+            _widget = QCheckBox(objectName=f"{task_name}+{task_key}+{title}")
+        elif type == "float":
+            _widget = QLineEdit(objectName=f"{task_name}+{task_key}+{title}")
+            # _widget.setValidator(QFloatValidator)
+
+        _container.layout().addWidget(_widget)
+        return _container
+
+    def _execute_task(self):
+        # Dict with arguments to be dumped in json file
+        args_dict = dict()
+
+        # Access metadata of currently loaded Zarr file to obtain path
+        selected_layer = self._viewer.layers[self._image_layers.currentText()]
+        path_to_zarr = selected_layer.source.path
+        args_dict['zarr_url'] = path_to_zarr
+
+        # Write json file with parameters to disk
+        # Launch subprocess with task inside
+        # Await process to finish and load lbels layer into viewer
+        # Use channel name that is currently displayed since this is according to metadata
+        for widget in self.tab_container.currentWidget().findChildren(QWidget):
+            if isinstance(widget, QLineEdit):
+                print(f"{widget.objectName()}, {widget.text()}")
+                key = widget.objectName().split('+')[1]
+                args_dict[key] = eval(widget.text()) # eval() not ideal...
+                exec_dict_key = widget.objectName().split("+")[0]
+
+        print(args_dict)
+        print(self.exec_dict)
+        print(exec_dict_key)
+
+        path_to_executable = self.exec_dict[exec_dict_key]
+
+        parent_path = os.path.split(path_to_executable)[0]
+        with open(os.path.join(parent_path, 'task_args.json'), 'w') as f:
+            json.dump(args_dict, f)
+
+        # Trigger addition of output layer when subprocess finishes running
+        results = subprocess.run(["python", path_to_executable])
+
+        while not os.path.exists(os.path.join(path_to_zarr, 'labels')):
+            time.sleep(1)
+
+        zarr_layer_data = napari_get_reader(os.path.join(path_to_zarr))()
+        for layer_data in zarr_layer_data:
+            if layer_data[-1] == 'labels':
+                self._viewer.add_layer(napari.layers.Layer.create(*layer_data))
+
+
+    def _add_task_tab(self):
+        ### Select file to create tab
+        path_to_task = self._select_task_file()
+
+        task_args = self._get_json_params(path_to_task)
+        task_container = QWidget(objectName=f'{task_args["task_list"][0]["name"]}')
+        task_container.setLayout(QVBoxLayout())
+
+        ### Add task properties to tab from Json file
+        ### Need to link parameters to task function here
+        path_head = os.path.split(path_to_task)[0]
+        path_to_executable_ = task_args["task_list"][0]["executable_parallel"]
+        path_to_executable = os.path.join(path_head, path_to_executable_)
+
+        self.exec_dict[f'{task_args["task_list"][0]["name"]}'] = path_to_executable
+
+        task_properties = task_args["task_list"][0]["args_schema_parallel"]["properties"]
+        for task_key in task_properties.keys():
+            if task_key not in ["zarr_url", "overwrite", "channel", "label_name"]:
+                property_widget = self._task_widget_maker(task_name=task_args["task_list"][0]["name"],
+                                                          task_key=task_key,
+                                                          **task_properties[task_key])
+                task_container.layout().addWidget(property_widget)
+
+        task_execute_button = QPushButton("Execute task")
+        task_execute_button.clicked.connect(self._execute_task)
+        task_container.layout().addWidget(task_execute_button)
+
+        task_close_button = QPushButton("Remove task")
+        task_close_button.clicked.connect(self._close_tab)
+        task_container.layout().addWidget(task_close_button)
+
+        self.tab_container.addTab(task_container, task_args["task_list"][0]["name"])
+
+    def _close_tab(self):
+        self.tab_container.removeTab(self.tab_container.currentIndex())
+
+    def _get_json_params(self, path_to_json):
+        with open(path_to_json) as f:
+            return json.load(f)
