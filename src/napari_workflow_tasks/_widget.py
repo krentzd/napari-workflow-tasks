@@ -20,11 +20,13 @@ from ome_zarr.types import LayerData
 from napari_ome_zarr._reader import napari_get_reader
 
 from pathlib import Path
+# TODO: separate out OMEZarrTaskManager
 # from .ome_zarr_task_manager import OMEZarrTaskManager
 
 if TYPE_CHECKING:
     import napari
 
+# TODO: Automatically decide what properties to ignore based on MANIFEST
 IGNORE_PROPERTIES = ['zarr_url', 'channel', 'channels_to_include', 'channels_to_exclude', 'measure_texture']
 
 def abspath(root, relpath):
@@ -81,9 +83,6 @@ class OMEZarrTaskManager:
         parent_dir = self.tasks[name]['parent_dir']
         title = self.tasks[name]['title']
         path_to_json = os.path.join(parent_dir, f'{title}.json')
-
-        # if self.tasks[name]['properties']['label_name']['value'] == "":
-        #     self.tasks[name]['properties']['label_name']['value'] = f"{self.tasks[name]['properties']['channel']['value']}_{self.tasks[name]['title']}"
 
         args_dict = dict()
         for prop_key in self.tasks[name]['properties'].keys():
@@ -198,7 +197,7 @@ class TasksQWidget(QWidget):
         icon_label.setFixedSize(icon_size_outer.width(), icon_size_outer.height())
         icon_img_container.layout().addWidget(icon_label)
 
-        main_title = QLabel('Interactive OME-Zarr Fractal Task Launcher')
+        main_title = QLabel('OME-Zarr Fractal Task Launcher')
         main_title.setFont(QFont('Arial', 16, weight=QFont.Bold))
         ### Main container
         self.main_container.setLayout(QVBoxLayout())
@@ -243,7 +242,6 @@ class TasksQWidget(QWidget):
                                        title=task["args_schema_parallel"]["title"])
 
     def _execute_task(self, task_name):
-
         selected_layer = self._viewer.layers[self._image_layers.currentText()]
         path_to_zarr = selected_layer.source.path
         self.task_manager.update_task_property(task_name, 'zarr_url', path_to_zarr)
@@ -251,11 +249,8 @@ class TasksQWidget(QWidget):
 
         task_properties = self.task_manager.get_properties(task_name)
         for property in [k for k in task_properties.keys() if k not in IGNORE_PROPERTIES]:
-        # for property in ['threshold', 'label_name', 'min_size', 'overwrite']:
             value = self.task_manager.get_widget_value(task_name, property)
             self.task_manager.update_task_property(task_name, property, value)
-
-        # Since the output is written to the Zarr file, remove the layer containing the zarr and reload it again once the process is finished
 
         self.task_manager.write_to_json(task_name)
 
@@ -265,9 +260,9 @@ class TasksQWidget(QWidget):
         p = subprocess.Popen(['python', path_to_executable])
         p.wait()
 
-        # Remove and reload zarr
-        # Future MANIFESTS should include output type
+        # TODO: Include output type in MANIFEST
         if task_name == 'Thresholding Label Task':
+            # Remove and reload zarr
             props = self.task_manager.get_properties(task_name)
             out_layer_name = props['label_name']['value']
 
@@ -301,17 +296,34 @@ class TasksQWidget(QWidget):
             if 'type' in task_properties[prop_key].keys() and prop_key not in IGNORE_PROPERTIES:
                 object_name = f'{task_name}+{prop_key}'
 
+                with_default_value = True
+                try:
+                    default_value = task_properties[prop_key]['default']
+                except KeyError:
+                    with_default_value = False
+
                 if task_properties[prop_key]['type'] == "integer":
                     widget_dict[prop_key] = QLineEdit(objectName=object_name)
+                    if with_default_value:
+                        widget_dict[prop_key].setText(str(default_value))
 
                 elif task_properties[prop_key]['type'] == "string":
                     widget_dict[prop_key] = QLineEdit(objectName=object_name)
+                    if with_default_value:
+                        widget_dict[prop_key].setText(str(default_value))
 
                 elif task_properties[prop_key]['type'] == "boolean":
                     widget_dict[prop_key] = QCheckBox(objectName=object_name)
+                    if with_default_value:
+                        if default_value:
+                            widget_dict[prop_key].setChecked(True)
+                        else:
+                            widget_dict[prop_key].setChecked(False)
 
                 elif task_properties[prop_key]['type'] == "float":
                     widget_dict[prop_key] = QLineEdit(objectName=object_name)
+                    if with_default_value:
+                        widget_dict[prop_key].setText(str(default_value))
 
         for prop_key in widget_dict.keys():
             container = QWidget()
@@ -323,6 +335,7 @@ class TasksQWidget(QWidget):
 
         self.task_manager.add_widget_dict(task_name, widget_dict)
 
+        # TODO: Add scrollble area
         # scroll_area = QScrollArea()
         # scroll_area.setWidgetResizable(True)
         # scroll_area.setWidget(task_container)
@@ -344,7 +357,7 @@ class TasksQWidget(QWidget):
         self.tab_container.addTab(task_container, task_name)
 
     def _close_tab(self):
-        # Need to handle OMETaskManager entries
+        # TODO: Explicitly handle task_manager dictionaries
         self.tab_container.removeTab(self.tab_container.currentIndex())
 
     def _get_json_params(self, path_to_json):
