@@ -2,7 +2,10 @@
 from typing import TYPE_CHECKING
 from qtpy.QtWidgets import (QHBoxLayout, QPushButton, QWidget, QTabWidget,
                             QTableWidget, QVBoxLayout, QAbstractItemView, QLabel,
-                            QLineEdit, QTabBar, QFileDialog, QCheckBox, QComboBox)
+                            QLineEdit, QTabBar, QFileDialog, QCheckBox, QComboBox,
+                            QScrollArea)
+from qtpy.QtGui import QPixmap, QFont
+from qtpy.QtCore import Qt, QSize
 import json
 import subprocess
 import os
@@ -16,10 +19,21 @@ from ome_zarr.types import LayerData
 
 from napari_ome_zarr._reader import napari_get_reader
 
+from pathlib import Path
+# from .ome_zarr_task_manager import OMEZarrTaskManager
+
 if TYPE_CHECKING:
     import napari
 
-class OMETaskManager:
+def abspath(root, relpath):
+    root = Path(root)
+    if root.is_dir():
+        path = root/relpath
+    else:
+        path = root.parent/relpath
+    return str(path.absolute())
+
+class OMEZarrTaskManager:
     # Manage tasks by keeping track of what each tab contains and what executable it links to
     def __init__(self):
         self.tasks = dict()
@@ -124,7 +138,7 @@ class TasksQWidget(QWidget):
 
         self.exec_dict = dict()
         ### Dictionary of TaskManager
-        self.task_manager = OMETaskManager()
+        self.task_manager = OMEZarrTaskManager()
 
         ### Core widget components
         self.main_container = QWidget()
@@ -133,7 +147,8 @@ class TasksQWidget(QWidget):
         ### Container to select napari layer
         image_input_container = QWidget()
         image_input_container.setLayout(QHBoxLayout())
-        image_input_label = QLabel('Image')
+        image_input_label = QLabel('Channel:')
+        image_input_label.setFont(QFont('Arial', 14, weight=QFont.Bold))
         image_input_container.layout().addWidget(image_input_label)
         self._image_layers = QComboBox(self)
         image_input_container.layout().addWidget(self._image_layers)
@@ -142,13 +157,21 @@ class TasksQWidget(QWidget):
         ### Select workflow with tasks
         self.workflow_adder_container = QWidget()
         self.workflow_adder_container.setLayout(QVBoxLayout())
-        self.workflow_adder_container.layout().addWidget(QLabel("Select workflow"))
 
         self.workflow_adder_btn = QPushButton("Add workflow")
         self.workflow_adder_btn.clicked.connect(self._select_workflow_file)
         self.workflow_adder_container.layout().addWidget(self.workflow_adder_btn)
+
+        select_workflow_container = QWidget()
+        select_workflow_container.setLayout(QHBoxLayout())
+        workflow_label = QLabel("Select workflow:")
+        workflow_label.setFont(QFont('Arial', 14, weight=QFont.Bold))
+        select_workflow_container.layout().addWidget(workflow_label)
+
         self.workflow_combo_box = QComboBox(self)
-        self.workflow_adder_container.layout().addWidget(self.workflow_combo_box)
+        select_workflow_container.layout().addWidget(self.workflow_combo_box)
+
+        self.workflow_adder_container.layout().addWidget(select_workflow_container)
 
         ### Container to add more tabs with tasks
         task_adder_container = QWidget()
@@ -158,8 +181,26 @@ class TasksQWidget(QWidget):
         self.task_adder_btn.clicked.connect(self._add_task_tab)
         task_adder_container.layout().addWidget(self.task_adder_btn)
 
+        ### Beautification...
+        icon_img_container = QWidget()
+        icon_img_container.setLayout(QHBoxLayout())
+        im_path = abspath(__file__, f'logo_images/fractal_logo.png')
+        icon_img = QPixmap(im_path)
+        icon_size_inner = QSize(120, 120)
+        icon_size_outer = QSize(130, 130)
+        icon_img = icon_img.scaled(icon_size_inner, Qt.KeepAspectRatio, transformMode=Qt.SmoothTransformation)
+        icon_label = QLabel()
+        icon_label.setPixmap(icon_img)
+        icon_label.setFixedSize(icon_size_outer.width(), icon_size_outer.height())
+        icon_img_container.layout().addWidget(icon_label)
+
+        main_title = QLabel('Interactive OME-Zarr Fractal Task Launcher')
+        main_title.setFont(QFont('Arial', 16, weight=QFont.Bold))
         ### Main container
         self.main_container.setLayout(QVBoxLayout())
+        self.main_container.setFixedHeight(500)
+        self.main_container.layout().addWidget(main_title)
+        self.main_container.layout().addWidget(icon_img_container)
         self.main_container.layout().addWidget(image_input_container)
         self.main_container.layout().addWidget(self.workflow_adder_container)
         self.main_container.layout().addWidget(task_adder_container)
@@ -218,24 +259,16 @@ class TasksQWidget(QWidget):
 
         p = subprocess.Popen(['python', path_to_executable])
         p.wait()
-        print('returncode', p.returncode)
 
         # Remove and reload zarr
         props = self.task_manager.get_properties(task_name)
         out_layer_name = props['label_name']['value']
-        print(out_layer_name)
-        # if out_layer_name in self._viewer.layers:
-        #     self._viewer.layers[out_layer_name].refresh()
-        #
-        # else:
-            # zarr_da = da.from_zarr(os.path.join(path_to_zarr), subpath=1)
+
+
+
         for layer in self._viewer.layers:
             if isinstance(layer, napari.layers.Labels):
                 self._viewer.layers.remove(layer.name)
-
-            # self._viewer.add_layer(zarr_da)
-        # Physically delete previous file and update forcibly
-        # Keep track of what files have been used so far
 
 
         zarr_layer_data = napari_get_reader(os.path.join(path_to_zarr))()
@@ -244,6 +277,7 @@ class TasksQWidget(QWidget):
                 layer = napari.layers.Layer.create(*layer_data)
                 print(out_layer_name, layer.name)
                 if layer.name == out_layer_name:
+                    layer.visible = True
                     self._viewer.add_layer(layer)
 
     def _add_task_tab(self):
@@ -282,6 +316,10 @@ class TasksQWidget(QWidget):
 
         self.task_manager.add_widget_dict(task_name, widget_dict)
 
+        # scroll_area = QScrollArea()
+        # scroll_area.setWidgetResizable(True)
+        # scroll_area.setWidget(task_container)
+
         task_execute_button = QPushButton("Execute task")
         task_execute_button.clicked.connect(lambda: self._execute_task(task_name))
         task_container.layout().addWidget(task_execute_button)
@@ -289,6 +327,12 @@ class TasksQWidget(QWidget):
         task_close_button = QPushButton("Remove task")
         task_close_button.clicked.connect(self._close_tab)
         task_container.layout().addWidget(task_close_button)
+
+        # scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        # scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # scroll_area.setWidget(task_container)
+        #
+        # task_container.setCentralWidget(scroll_area)
 
         self.tab_container.addTab(task_container, task_name)
 
