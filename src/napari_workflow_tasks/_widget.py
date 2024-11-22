@@ -121,6 +121,10 @@ class OMEZarrTaskManager:
                         widget_dict):
         self.tasks[name]['widget_dict'] = widget_dict
 
+    def remove_widget_dict(self,
+                           name):
+        self.tasks[name]['widge_dict'] = dict()
+
     def get_widget_value(self,
                          name,
                          property):
@@ -190,7 +194,7 @@ class TasksQWidget(QWidget):
         super().__init__()
         self._viewer = napari_viewer
 
-        self.exec_dict = dict()
+        self.exec_btn_dict = dict()
 
         ### Dictionary of TaskManager
         self.task_manager = OMEZarrTaskManager()
@@ -233,7 +237,7 @@ class TasksQWidget(QWidget):
         task_adder_container.setLayout(QHBoxLayout())
 
         self.task_adder_btn = QPushButton("Add task")
-        self.task_adder_btn.clicked.connect(self._add_task_tab)
+        self.task_adder_btn.clicked.connect(self._add_task)
         task_adder_container.layout().addWidget(self.task_adder_btn)
 
         ### Beautification...
@@ -320,6 +324,12 @@ class TasksQWidget(QWidget):
         self.worker.deleteLater()
         self.thread.deleteLater()
 
+        self._update_execute_buttons(is_enabled=True)
+
+    def _update_execute_buttons(self, is_enabled=True):
+        for name in self.exec_btn_dict.keys():
+            self.exec_btn_dict[name].setEnabled(is_enabled)
+
     def _execute_task(self, task_name):
         selected_layer = self._viewer.layers[self._image_layers.currentText()]
         path_to_zarr = selected_layer.source.path
@@ -339,7 +349,9 @@ class TasksQWidget(QWidget):
         # TODO: Only launch new thread once existing thread deleted
         # while not thread_exists:
         #   create new thread
-        self.thread = QThread()
+        self._update_execute_buttons(is_enabled=False)
+
+        self.thread = QThread(parent=self)
         self.worker = TasksWorker()
         self.worker.task_name = task_name
         self.worker.task_manager = self.task_manager
@@ -347,9 +359,6 @@ class TasksQWidget(QWidget):
 
         self.thread.started.connect(self.worker.run)
         self.worker.finished.connect(self._fetch_subprocess_output)
-        # self.worker.finished.connect(self.thread.quit)
-        # self.worker.finished.connect(self.worker.deleteLater)
-        # self.worker.finished.connect(self.thread.deleteLater)
 
         self.thread.start()
         # QLabel describing state of progress
@@ -357,36 +366,24 @@ class TasksQWidget(QWidget):
         #     lambda: self.stepLabel.setText("Long-Running Step: 0")
         # )
         #
-        # self.thread.start()
-        # path_to_executable = self.task_manager.get_executable_path(task_name)
-        # print(path_to_executable)
-        #
-        # p = subprocess.Popen(['python', path_to_executable])
-        # p.wait()
 
-        # if task_name == 'Thresholding Label Task':
-        #     wipe_cache()
-        #     # Remove and reload zarr
-        #     props = self.task_manager.get_properties(task_name)
-        #     out_layer_name = props['label_name']['value']
-        #
-        #     for layer in self._viewer.layers:
-        #         if isinstance(layer, napari.layers.Labels):
-        #             self._viewer.layers.remove(layer.name)
-        #
-        #     zarr_layer_data = napari_get_reader(path_to_zarr)()
-        #     for layer_data in zarr_layer_data:
-        #         if layer_data[-1] == 'labels':
-        #             layer = napari.layers.Layer.create(*layer_data)
-        #             print(out_layer_name, layer.name)
-        #             if layer.name == out_layer_name:
-        #                 layer.visible = True
-        #                 self._viewer.add_layer(layer)
+    def _task_tab_exists(self, task_name):
+        for child_widget in self.tab_container.findChildren(QWidget):
+            if isinstance(child_widget, QWidget):
+                if child_widget.objectName() == task_name:
+                    return True
+        return False
 
-    def _add_task_tab(self):
-
+    def _add_task(self):
         task_name = self.workflow_combo_box.currentText()
 
+        if self._task_tab_exists(task_name):
+            _widget = self.tab_container.findChild(QWidget, task_name)
+            self.tab_container.setCurrentWidget(_widget)
+        else:
+            self._add_task_tab(task_name)
+
+    def _add_task_tab(self, task_name):
         task_container = QWidget(objectName=f'{task_name}')
         task_container.setLayout(QVBoxLayout())
 
@@ -394,6 +391,7 @@ class TasksQWidget(QWidget):
 
         # TODO: Function to build an individual parameter widget should be separated out to enable recursive addition
         widget_dict = dict()
+        # Automatically read zarr and enum options
         for prop_key in task_properties.keys():
             if 'type' in task_properties[prop_key].keys() and prop_key not in IGNORE_PROPERTIES:
                 object_name = f'{task_name}+{prop_key}'
@@ -451,12 +449,12 @@ class TasksQWidget(QWidget):
         # scroll_area.setWidgetResizable(True)
         # scroll_area.setWidget(task_container)
 
-        task_execute_button = QPushButton("Execute task")
-        task_execute_button.clicked.connect(lambda: self._execute_task(task_name))
-        task_container.layout().addWidget(task_execute_button)
+        self.exec_btn_dict[task_name] = QPushButton("Execute task")
+        self.exec_btn_dict[task_name].clicked.connect(lambda: self._execute_task(task_name))
+        task_container.layout().addWidget(self.exec_btn_dict[task_name])
 
         task_close_button = QPushButton("Remove task")
-        task_close_button.clicked.connect(self._close_tab)
+        task_close_button.clicked.connect(lambda: self._close_tab(task_name))
         task_container.layout().addWidget(task_close_button)
 
         # scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
@@ -467,8 +465,15 @@ class TasksQWidget(QWidget):
 
         self.tab_container.addTab(task_container, task_name)
 
-    def _close_tab(self):
+    def _close_tab(self, task_name):
         # TODO: Explicitly handle task_manager dictionaries
+        self.task_manager.remove_widget_dict(task_name)
+
+        for child_widget in self.tab_container.findChildren(QWidget):
+            if isinstance(child_widget, QWidget):
+                if task_name in child_widget.objectName():
+                    child_widget.deleteLater()
+
         self.tab_container.removeTab(self.tab_container.currentIndex())
 
     def _get_json_params(self, path_to_json):
