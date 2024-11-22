@@ -7,13 +7,13 @@ from qtpy.QtWidgets import (QHBoxLayout, QPushButton, QWidget, QTabWidget,
 from qtpy.QtGui import QPixmap, QFont
 from qtpy.QtCore import Qt, QSize
 
+from PyQt5.QtCore import QObject, QThread, pyqtSignal, pyqtSlot
 # from superqt import QCollapsible
 
 import json
 import subprocess
 import os
 import napari
-
 import dask.array as da
 
 from ome_zarr.reader import Reader
@@ -21,6 +21,7 @@ from ome_zarr.io import parse_url
 from ome_zarr.types import LayerData
 
 from napari_ome_zarr._reader import napari_get_reader
+from napari.qt.threading import thread_worker
 
 from pathlib import Path
 
@@ -142,6 +143,48 @@ class OMEZarrTaskManager:
             else:
                 return False
 
+class TasksWorker(QObject):
+    finished = pyqtSignal(str)
+    progress = pyqtSignal(int)
+
+    @property
+    def task_name(self):
+        return self._task_name
+
+    @task_name.setter
+    def task_name(self, name):
+        # Add checks for validity
+        print(f'Set task_name as {name}')
+        self._task_name = name
+
+    @property
+    def task_manager(self):
+        return self._task_manager
+
+    @task_manager.setter
+    def task_manager(self, task_manager):
+        # Add checks for validity
+        print(f'Set task_manager')
+        self._task_manager = task_manager
+
+    @pyqtSlot()
+    def run(self):
+        print('Thread running')
+        task_name = self._launch_task_subprocess(self.task_name)
+        self.finished.emit(task_name)
+
+    def _launch_task_subprocess(self, task_name):
+        print('Launching subprocess...')
+        path_to_executable = self.task_manager.get_executable_path(task_name)
+        print(path_to_executable)
+
+        p = subprocess.Popen(['python', path_to_executable])
+        p.wait()
+
+        print('Finished running subprocess')
+
+        return task_name
+
 class TasksQWidget(QWidget):
     def __init__(self, napari_viewer):
         super().__init__()
@@ -217,10 +260,6 @@ class TasksQWidget(QWidget):
         self.main_container.layout().addWidget(self.workflow_adder_container)
         self.main_container.layout().addWidget(task_adder_container)
 
-        # collapsible = QCollapsible("Advanced analysis")
-        # collapsible.addWidget(QLabel("This is the inside of the collapsible frame"))
-        # self.main_container.layout().addWidget(collapsible)
-
         ### Tasks container
         self.tab_container.addTab(self.main_container, "Main")
 
@@ -254,6 +293,33 @@ class TasksQWidget(QWidget):
                                        type=task["args_schema_parallel"]["type"],
                                        title=task["args_schema_parallel"]["title"])
 
+    def _fetch_subprocess_output(self, task_name):
+        print(f'Received task_name={task_name}')
+        if task_name == 'Thresholding Label Task':
+            wipe_cache()
+            # Remove and reload zarr
+            props = self.task_manager.get_properties(task_name)
+            path_to_zarr = props['zarr_url']['value']
+            out_layer_name = props['label_name']['value']
+            print(f'out_layer_name={out_layer_name}')
+
+            for layer in self._viewer.layers:
+                if isinstance(layer, napari.layers.Labels):
+                    self._viewer.layers.remove(layer.name)
+
+            zarr_layer_data = napari_get_reader(path_to_zarr)()
+            for layer_data in zarr_layer_data:
+                if layer_data[-1] == 'labels':
+                    layer = napari.layers.Layer.create(*layer_data)
+                    print(out_layer_name, layer.name)
+                    if layer.name == out_layer_name:
+                        layer.visible = True
+                        self._viewer.add_layer(layer)
+
+        self.thread.quit()
+        self.worker.deleteLater()
+        self.thread.deleteLater()
+
     def _execute_task(self, task_name):
         selected_layer = self._viewer.layers[self._image_layers.currentText()]
         path_to_zarr = selected_layer.source.path
@@ -269,30 +335,53 @@ class TasksQWidget(QWidget):
 
         self.task_manager.write_to_json(task_name)
 
-        path_to_executable = self.task_manager.get_executable_path(task_name)
-        print(path_to_executable)
+        # Launch subprocess in separate thread to avoid GUI freezing
+        # TODO: Only launch new thread once existing thread deleted
+        # while not thread_exists:
+        #   create new thread
+        self.thread = QThread()
+        self.worker = TasksWorker()
+        self.worker.task_name = task_name
+        self.worker.task_manager = self.task_manager
+        self.worker.moveToThread(self.thread)
 
-        p = subprocess.Popen(['python', path_to_executable])
-        p.wait()
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self._fetch_subprocess_output)
+        # self.worker.finished.connect(self.thread.quit)
+        # self.worker.finished.connect(self.worker.deleteLater)
+        # self.worker.finished.connect(self.thread.deleteLater)
 
-        if task_name == 'Thresholding Label Task':
-            wipe_cache()
-            # Remove and reload zarr
-            props = self.task_manager.get_properties(task_name)
-            out_layer_name = props['label_name']['value']
+        self.thread.start()
+        # QLabel describing state of progress
+        # self.thread.finished.connect(
+        #     lambda: self.stepLabel.setText("Long-Running Step: 0")
+        # )
+        #
+        # self.thread.start()
+        # path_to_executable = self.task_manager.get_executable_path(task_name)
+        # print(path_to_executable)
+        #
+        # p = subprocess.Popen(['python', path_to_executable])
+        # p.wait()
 
-            for layer in self._viewer.layers:
-                if isinstance(layer, napari.layers.Labels):
-                    self._viewer.layers.remove(layer.name)
-
-            zarr_layer_data = napari_get_reader(path_to_zarr)()
-            for layer_data in zarr_layer_data:
-                if layer_data[-1] == 'labels':
-                    layer = napari.layers.Layer.create(*layer_data)
-                    print(out_layer_name, layer.name)
-                    if layer.name == out_layer_name:
-                        layer.visible = True
-                        self._viewer.add_layer(layer)
+        # if task_name == 'Thresholding Label Task':
+        #     wipe_cache()
+        #     # Remove and reload zarr
+        #     props = self.task_manager.get_properties(task_name)
+        #     out_layer_name = props['label_name']['value']
+        #
+        #     for layer in self._viewer.layers:
+        #         if isinstance(layer, napari.layers.Labels):
+        #             self._viewer.layers.remove(layer.name)
+        #
+        #     zarr_layer_data = napari_get_reader(path_to_zarr)()
+        #     for layer_data in zarr_layer_data:
+        #         if layer_data[-1] == 'labels':
+        #             layer = napari.layers.Layer.create(*layer_data)
+        #             print(out_layer_name, layer.name)
+        #             if layer.name == out_layer_name:
+        #                 layer.visible = True
+        #                 self._viewer.add_layer(layer)
 
     def _add_task_tab(self):
 
@@ -340,6 +429,10 @@ class TasksQWidget(QWidget):
 
                 elif task_properties[prop_key]['type'] == "object":
                     # Loop over object inputs recursively
+                    # TODO: Integrate support for collapsible widgets
+                    # collapsible = QCollapsible("Advanced analysis")
+                    # collapsible.addWidget(QLabel("This is the inside of the collapsible frame"))
+                    # self.main_container.layout().addWidget(collapsible)
                     pass
 
 
