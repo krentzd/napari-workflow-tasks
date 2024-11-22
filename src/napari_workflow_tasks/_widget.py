@@ -6,6 +6,9 @@ from qtpy.QtWidgets import (QHBoxLayout, QPushButton, QWidget, QTabWidget,
                             QScrollArea)
 from qtpy.QtGui import QPixmap, QFont
 from qtpy.QtCore import Qt, QSize
+
+# from superqt import QCollapsible
+
 import json
 import subprocess
 import os
@@ -20,14 +23,19 @@ from ome_zarr.types import LayerData
 from napari_ome_zarr._reader import napari_get_reader
 
 from pathlib import Path
-# TODO: separate out OMEZarrTaskManager
-# from .ome_zarr_task_manager import OMEZarrTaskManager
 
 if TYPE_CHECKING:
     import napari
 
 # TODO: Automatically decide what properties to ignore based on MANIFEST
 IGNORE_PROPERTIES = ['zarr_url', 'channel', 'channels_to_include', 'channels_to_exclude', 'measure_texture']
+
+def wipe_cache():
+    from napari.utils import resize_dask_cache
+    cache = resize_dask_cache()
+    cache_bytes = cache.cache.available_bytes
+    cache = resize_dask_cache(nbytes=0)
+    cache = resize_dask_cache(nbytes=cache_bytes)
 
 def abspath(root, relpath):
     root = Path(root)
@@ -140,6 +148,7 @@ class TasksQWidget(QWidget):
         self._viewer = napari_viewer
 
         self.exec_dict = dict()
+
         ### Dictionary of TaskManager
         self.task_manager = OMEZarrTaskManager()
 
@@ -208,6 +217,10 @@ class TasksQWidget(QWidget):
         self.main_container.layout().addWidget(self.workflow_adder_container)
         self.main_container.layout().addWidget(task_adder_container)
 
+        # collapsible = QCollapsible("Advanced analysis")
+        # collapsible.addWidget(QLabel("This is the inside of the collapsible frame"))
+        # self.main_container.layout().addWidget(collapsible)
+
         ### Tasks container
         self.tab_container.addTab(self.main_container, "Main")
 
@@ -245,6 +258,8 @@ class TasksQWidget(QWidget):
         selected_layer = self._viewer.layers[self._image_layers.currentText()]
         path_to_zarr = selected_layer.source.path
         self.task_manager.update_task_property(task_name, 'zarr_url', path_to_zarr)
+
+        # TODO: This should be set from Zarr metadata file
         self.task_manager.update_task_property(task_name, 'channel', self._image_layers.currentText())
 
         task_properties = self.task_manager.get_properties(task_name)
@@ -260,20 +275,17 @@ class TasksQWidget(QWidget):
         p = subprocess.Popen(['python', path_to_executable])
         p.wait()
 
-        # TODO: Include output type in MANIFEST
         if task_name == 'Thresholding Label Task':
+            wipe_cache()
             # Remove and reload zarr
             props = self.task_manager.get_properties(task_name)
             out_layer_name = props['label_name']['value']
-
-
 
             for layer in self._viewer.layers:
                 if isinstance(layer, napari.layers.Labels):
                     self._viewer.layers.remove(layer.name)
 
-
-            zarr_layer_data = napari_get_reader(os.path.join(path_to_zarr))()
+            zarr_layer_data = napari_get_reader(path_to_zarr)()
             for layer_data in zarr_layer_data:
                 if layer_data[-1] == 'labels':
                     layer = napari.layers.Layer.create(*layer_data)
@@ -291,6 +303,7 @@ class TasksQWidget(QWidget):
 
         task_properties = self.task_manager.get_properties(task_name)
 
+        # TODO: Function to build an individual parameter widget should be separated out to enable recursive addition
         widget_dict = dict()
         for prop_key in task_properties.keys():
             if 'type' in task_properties[prop_key].keys() and prop_key not in IGNORE_PROPERTIES:
@@ -324,6 +337,11 @@ class TasksQWidget(QWidget):
                     widget_dict[prop_key] = QLineEdit(objectName=object_name)
                     if with_default_value:
                         widget_dict[prop_key].setText(str(default_value))
+
+                elif task_properties[prop_key]['type'] == "object":
+                    # Loop over object inputs recursively
+                    pass
+
 
         for prop_key in widget_dict.keys():
             container = QWidget()
