@@ -46,7 +46,7 @@ def abspath(root, relpath):
         path = root.parent/relpath
     return str(path.absolute())
 
-class OMEZarrTaskManager:
+class FractalTaskManager:
     # Manage tasks by keeping track of what each tab contains and what executable it links to
     def __init__(self):
         self.tasks = dict()
@@ -77,6 +77,13 @@ class OMEZarrTaskManager:
         exec_fname = self.tasks[name]['executable_parallel']
 
         return os.path.join(parent_dir, exec_fname)
+
+    def get_path_to_json(self,
+                         name):
+
+        parent_dir = self.tasks[name]['parent_dir']
+        title = self.tasks[name]['title']
+        return os.path.join(parent_dir, f'{title}.json')
 
     def get_task(self,
                  name):
@@ -147,7 +154,7 @@ class OMEZarrTaskManager:
             else:
                 return False
 
-class TasksWorker(QObject):
+class TaskWorker(QObject):
     finished = pyqtSignal(str)
     progress = pyqtSignal(int)
 
@@ -182,7 +189,9 @@ class TasksWorker(QObject):
         path_to_executable = self.task_manager.get_executable_path(task_name)
         print(path_to_executable)
 
-        p = subprocess.Popen(['python', path_to_executable])
+        path_to_task_args = self.task_manager.get_path_to_json(task_name)
+
+        p = subprocess.Popen(['python', os.path.join(os.path.dirname(__file__), 'task_wrapper.py'), '--executable', path_to_executable, '--path_to_task_args', path_to_task_args]) #Pass wrapper_args: path to executable
         p.wait()
 
         print('Finished running subprocess')
@@ -197,7 +206,7 @@ class TasksQWidget(QWidget):
         self.exec_btn_dict = dict()
 
         ### Dictionary of TaskManager
-        self.task_manager = OMEZarrTaskManager()
+        self.task_manager = FractalTaskManager()
 
         ### Core widget components
         self.main_container = QWidget()
@@ -253,7 +262,7 @@ class TasksQWidget(QWidget):
         icon_label.setFixedSize(icon_size_outer.width(), icon_size_outer.height())
         icon_img_container.layout().addWidget(icon_label)
 
-        main_title = QLabel('OME-Zarr Fractal Task Launcher')
+        main_title = QLabel('Fractal Task Launcher')
         main_title.setFont(QFont('Arial', 16, weight=QFont.Bold))
         ### Main container
         self.main_container.setLayout(QVBoxLayout())
@@ -352,7 +361,7 @@ class TasksQWidget(QWidget):
         self._update_execute_buttons(is_enabled=False)
 
         self.thread = QThread(parent=self)
-        self.worker = TasksWorker()
+        self.worker = TaskWorker()
         self.worker.task_name = task_name
         self.worker.task_manager = self.task_manager
         self.worker.moveToThread(self.thread)
@@ -402,7 +411,8 @@ class TasksQWidget(QWidget):
                 except KeyError:
                     with_default_value = False
 
-                if task_properties[prop_key]['type'] == "integer":
+                # if task_properties[prop_key]['type'] == "integer":
+                if task_properties[prop_key]['type'] in ["integer", "float", "number"]:
                     widget_dict[prop_key] = QLineEdit(objectName=object_name)
                     if with_default_value:
                         widget_dict[prop_key].setText(str(default_value))
@@ -420,10 +430,10 @@ class TasksQWidget(QWidget):
                         else:
                             widget_dict[prop_key].setChecked(False)
 
-                elif task_properties[prop_key]['type'] == "float":
-                    widget_dict[prop_key] = QLineEdit(objectName=object_name)
-                    if with_default_value:
-                        widget_dict[prop_key].setText(str(default_value))
+                # elif task_properties[prop_key]['type'] == "float":
+                #     widget_dict[prop_key] = QLineEdit(objectName=object_name)
+                #     if with_default_value:
+                #         widget_dict[prop_key].setText(str(default_value))
 
                 elif task_properties[prop_key]['type'] == "object":
                     # Loop over object inputs recursively
@@ -437,7 +447,10 @@ class TasksQWidget(QWidget):
         for prop_key in widget_dict.keys():
             container = QWidget()
             container.setLayout(QHBoxLayout())
-            container.layout().addWidget(QLabel(task_properties[prop_key]['title']))
+            qlabel_ = QLabel(task_properties[prop_key]['title'])
+            qlabel_.setToolTip(task_properties[prop_key]['description'])
+            qlabel_.setToolTipDuration(3000)
+            container.layout().addWidget(qlabel_)
 
             container.layout().addWidget(widget_dict[prop_key])
             task_container.layout().addWidget(container)
