@@ -2,7 +2,16 @@ import json
 import importlib
 import argparse
 import os
+
+from inspect import getmembers, isfunction, isclass
+
+import fractal_tasks_core
+
 from fractal_tasks_core.channels import ChannelInputModel
+from fractal_tasks_core.tasks.cellpose_utils import CellposeChannel1InputModel
+from fractal_tasks_core.tasks.cellpose_utils import CellposeChannel2InputModel
+from fractal_tasks_core.tasks.cellpose_utils import CellposeCustomNormalizer
+from fractal_tasks_core.tasks.cellpose_utils import CellposeModelParams
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -14,8 +23,10 @@ if __name__ == "__main__":
     with open(args.path_to_task_args) as f:
         task_args = json.load(f)
 
-    if 'channel' in task_args.keys():
-        task_args['channel'] = ChannelInputModel(label=task_args['channel'])
+    for key in task_args.keys():
+        if isinstance(task_args[key], dict):
+            type_func = getattr(fractal_tasks_core.tasks.cellpose_utils, task_args[key]['type'])
+            task_args[key] = type_func(**task_args[key]['args'])
 
     executable_name = os.path.splitext(os.path.basename(args.executable))[0]
 

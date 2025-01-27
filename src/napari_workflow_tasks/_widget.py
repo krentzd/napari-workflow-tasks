@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     import napari
 
 # TODO: Automatically decide what properties to ignore based on MANIFEST
-IGNORE_PROPERTIES = ['zarr_url', 'channel', 'channels_to_include', 'channels_to_exclude', 'measure_texture']
+IGNORE_PROPERTIES = ['zarr_url', 'channels_to_include', 'channels_to_exclude', 'measure_texture'] #, 'channel'
 
 def wipe_cache():
     from napari.utils import resize_dask_cache
@@ -56,6 +56,7 @@ class FractalTaskManager:
                  parent_dir,
                  executable_parallel,
                  properties,
+                 defs,
                  required,
                  type,
                  title):
@@ -65,6 +66,7 @@ class FractalTaskManager:
             parent_dir=parent_dir,
             executable_parallel=executable_parallel,
             properties=properties,
+            defs=defs,
             required=required,
             type=type,
             widget_dict=dict()
@@ -92,6 +94,10 @@ class FractalTaskManager:
     def get_properties(self,
                        name):
         return self.tasks[name]['properties']
+
+    def get_defs(self,
+                 name):
+        return self.tasks[name]['defs']
 
     def write_to_json(self,
                       name):
@@ -139,20 +145,60 @@ class FractalTaskManager:
 
         if isinstance(widget, QLineEdit):
             value = widget.text()
-            type = self.tasks[name]['properties'][property]['type']
-
-            if type == 'integer':
-                return int(value)
-            elif type == 'float':
-                return float(value)
+            if value == "":
+                return None
             else:
-                return value
+                try:
+                    type = self.tasks[name]['properties'][property]['type']
+
+                    if type == 'integer':
+                        return int(value)
+                    elif type == 'float':
+                        return float(value)
+                    else:
+                        return value
+                except KeyError:
+                    return value
 
         elif isinstance(widget, QCheckBox):
             if widget.isChecked():
                 return True
             else:
                 return False
+
+        elif isinstance(widget, dict):
+            args_dict = dict()
+            ref = os.path.split(self.tasks[name]['properties'][property]['$ref'])[-1]
+            for key in widget.keys():
+                if isinstance(widget[key], QLineEdit):
+                    value = widget[key].text()
+                    if value == "":
+                        args_dict[key] = None
+                    else:
+                        try:
+                            type = self.tasks[name]['defs'][ref][key]['type']
+                            print(name, property, key, type)
+
+                            if type == 'integer':
+                                args_dict[key] = int(value)
+                            elif type == 'float':
+                                args_dict[key] = float(value)
+                            else:
+                                args_dict[key] = value
+                        except KeyError:
+                            args_dict[key] = value
+
+                elif isinstance(widget[key], QCheckBox):
+                    if widget[key].isChecked():
+                        args_dict[key] = True
+                    else:
+                        args_dict[key] = False
+
+            return_dict = dict(args=args_dict,
+                               type=self.tasks[name]['defs'][ref]['title'])
+
+            return return_dict
+
 
 class TaskWorker(QObject):
     finished = pyqtSignal(str)
@@ -215,7 +261,7 @@ class TasksQWidget(QWidget):
         ### Container to select napari layer
         image_input_container = QWidget()
         image_input_container.setLayout(QHBoxLayout())
-        image_input_label = QLabel('Channel:')
+        image_input_label = QLabel('Input:')
         image_input_label.setFont(QFont('Arial', 14, weight=QFont.Bold))
         image_input_container.layout().addWidget(image_input_label)
         self._image_layers = QComboBox(self)
@@ -302,18 +348,24 @@ class TasksQWidget(QWidget):
                                        parent_dir=os.path.split(path_to_workflow)[0],
                                        executable_parallel=task["executable_parallel"],
                                        properties=task["args_schema_parallel"]["properties"],
+                                       defs=task["args_schema_parallel"]["$defs"],
                                        required=task["args_schema_parallel"]["required"],
                                        type=task["args_schema_parallel"]["type"],
                                        title=task["args_schema_parallel"]["title"])
 
     def _fetch_subprocess_output(self, task_name):
         print(f'Received task_name={task_name}')
-        if task_name == 'Thresholding Label Task':
+        if task_name in ['Thresholding Label Task', 'Cellpose Segmentation']:
             wipe_cache()
             # Remove and reload zarr
             props = self.task_manager.get_properties(task_name)
             path_to_zarr = props['zarr_url']['value']
-            out_layer_name = props['label_name']['value']
+
+            if task_name == 'Thresholding Label Task':
+                out_layer_name = props['label_name']['value']
+            elif task_name == 'Cellpose Segmentation':
+                out_layer_name = props['output_label_name']['value']
+
             print(f'out_layer_name={out_layer_name}')
 
             for layer in self._viewer.layers:
@@ -393,8 +445,9 @@ class TasksQWidget(QWidget):
             self._add_task_tab(task_name)
 
     def _add_task_tab(self, task_name):
-        task_container = QWidget(objectName=f'{task_name}')
-        task_container.setLayout(QVBoxLayout())
+        task_container = QTabWidget(objectName=f'{task_name}')
+        main_container = QWidget(objectName=f'{task_name}_main')
+        main_container.setLayout(QVBoxLayout())
 
         task_properties = self.task_manager.get_properties(task_name)
 
@@ -402,22 +455,17 @@ class TasksQWidget(QWidget):
         widget_dict = dict()
         # Automatically read zarr and enum options
         for prop_key in task_properties.keys():
+
+            object_name = f'{task_name}+{prop_key}'
+
+            with_default_value = True
+            try:
+                default_value = task_properties[prop_key]['default']
+            except KeyError:
+                with_default_value = False
+
             if 'type' in task_properties[prop_key].keys() and prop_key not in IGNORE_PROPERTIES:
-                object_name = f'{task_name}+{prop_key}'
-
-                with_default_value = True
-                try:
-                    default_value = task_properties[prop_key]['default']
-                except KeyError:
-                    with_default_value = False
-
-                # if task_properties[prop_key]['type'] == "integer":
-                if task_properties[prop_key]['type'] in ["integer", "float", "number"]:
-                    widget_dict[prop_key] = QLineEdit(objectName=object_name)
-                    if with_default_value:
-                        widget_dict[prop_key].setText(str(default_value))
-
-                elif task_properties[prop_key]['type'] == "string":
+                if task_properties[prop_key]['type'] in ["integer", "float", "number", "string"]:
                     widget_dict[prop_key] = QLineEdit(objectName=object_name)
                     if with_default_value:
                         widget_dict[prop_key].setText(str(default_value))
@@ -430,51 +478,88 @@ class TasksQWidget(QWidget):
                         else:
                             widget_dict[prop_key].setChecked(False)
 
-                # elif task_properties[prop_key]['type'] == "float":
-                #     widget_dict[prop_key] = QLineEdit(objectName=object_name)
-                #     if with_default_value:
-                #         widget_dict[prop_key].setText(str(default_value))
-
                 elif task_properties[prop_key]['type'] == "object":
-                    # Loop over object inputs recursively
-                    # TODO: Integrate support for collapsible widgets
-                    # collapsible = QCollapsible("Advanced analysis")
-                    # collapsible.addWidget(QLabel("This is the inside of the collapsible frame"))
-                    # self.main_container.layout().addWidget(collapsible)
                     pass
 
+            elif '$ref' in task_properties[prop_key].keys() and prop_key not in IGNORE_PROPERTIES:
+                defs = self.task_manager.get_defs(task_name)
+                ref = os.path.split(task_properties[prop_key]['$ref'])[-1]
+                defs_props = defs[ref]['properties']
+
+                widget_dict_ = dict()
+                for def_prop_key in defs_props.keys():
+                    object_name_ = object_name + f'+{def_prop_key}'
+
+                    with_default_value = True
+                    try:
+                        default_value = defs_props[def_prop_key]['default']
+                    except KeyError:
+                        with_default_value = False
+
+                    if 'type' in defs_props[def_prop_key].keys():
+                        if defs_props[def_prop_key]['type'] in ["integer", "float", "number", "string"]:
+                            widget_dict_[def_prop_key] = QLineEdit(objectName=object_name_)
+                            if with_default_value:
+                                widget_dict_[def_prop_key].setText(str(default_value))
+
+                        elif defs_props[def_prop_key]['type'] == "boolean":
+                            widget_dict_[def_prop_key] = QCheckBox(objectName=object_name_)
+                            if with_default_value:
+                                if default_value:
+                                    widget_dict_[def_prop_key].setChecked(True)
+                                else:
+                                    widget_dict_[def_prop_key].setChecked(False)
+
+                widget_dict[prop_key] = widget_dict_
+
+            elif prop_key not in IGNORE_PROPERTIES:
+                    widget_dict[prop_key] = QLineEdit(objectName=object_name)
+                    if with_default_value:
+                        widget_dict[prop_key].setText(str(default_value))
 
         for prop_key in widget_dict.keys():
-            container = QWidget()
-            container.setLayout(QHBoxLayout())
-            qlabel_ = QLabel(task_properties[prop_key]['title'])
-            qlabel_.setToolTip(task_properties[prop_key]['description'])
-            qlabel_.setToolTipDuration(3000)
-            container.layout().addWidget(qlabel_)
+            if isinstance(widget_dict[prop_key], dict):
+                defs = self.task_manager.get_defs(task_name)
+                ref = os.path.split(task_properties[prop_key]['$ref'])[-1]
+                defs_props = defs[ref]['properties']
 
-            container.layout().addWidget(widget_dict[prop_key])
-            task_container.layout().addWidget(container)
+                outer_container = QWidget()
+                outer_container.setLayout(QVBoxLayout())
+                for prop_key_ in widget_dict[prop_key].keys():
+                    container = QWidget()
+                    container.setLayout(QHBoxLayout())
+                    qlabel_ = QLabel(defs_props[prop_key_]['title'])
+                    qlabel_.setToolTip(defs_props[prop_key_]['description'])
+                    qlabel_.setToolTipDuration(3000)
+                    container.layout().addWidget(qlabel_)
+
+                    container.layout().addWidget(widget_dict[prop_key][prop_key_])
+                    outer_container.layout().addWidget(container)
+
+                task_container.addTab(outer_container, task_properties[prop_key]['title'])
+
+            else:
+                container = QWidget()
+                container.setLayout(QHBoxLayout())
+                qlabel_ = QLabel(task_properties[prop_key]['title'])
+                qlabel_.setToolTip(task_properties[prop_key]['description'])
+                qlabel_.setToolTipDuration(3000)
+                container.layout().addWidget(qlabel_)
+
+                container.layout().addWidget(widget_dict[prop_key])
+                main_container.layout().addWidget(container)
 
         self.task_manager.add_widget_dict(task_name, widget_dict)
 
-        # TODO: Add scrollble area
-        # scroll_area = QScrollArea()
-        # scroll_area.setWidgetResizable(True)
-        # scroll_area.setWidget(task_container)
-
         self.exec_btn_dict[task_name] = QPushButton("Execute task")
         self.exec_btn_dict[task_name].clicked.connect(lambda: self._execute_task(task_name))
-        task_container.layout().addWidget(self.exec_btn_dict[task_name])
+        main_container.layout().addWidget(self.exec_btn_dict[task_name])
 
         task_close_button = QPushButton("Remove task")
         task_close_button.clicked.connect(lambda: self._close_tab(task_name))
-        task_container.layout().addWidget(task_close_button)
+        main_container.layout().addWidget(task_close_button)
 
-        # scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        # scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        # scroll_area.setWidget(task_container)
-        #
-        # task_container.setCentralWidget(scroll_area)
+        task_container.addTab(main_container, "Main")
 
         self.tab_container.addTab(task_container, task_name)
 
