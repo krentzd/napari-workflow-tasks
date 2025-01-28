@@ -348,7 +348,7 @@ class TasksQWidget(QWidget):
                                        parent_dir=os.path.split(path_to_workflow)[0],
                                        executable_parallel=task["executable_parallel"],
                                        properties=task["args_schema_parallel"]["properties"],
-                                       defs=task["args_schema_parallel"]["$defs"],
+                                       defs=task["args_schema_parallel"].get("$defs", None),
                                        required=task["args_schema_parallel"]["required"],
                                        type=task["args_schema_parallel"]["type"],
                                        title=task["args_schema_parallel"]["title"])
@@ -529,8 +529,11 @@ class TasksQWidget(QWidget):
                     container = QWidget()
                     container.setLayout(QHBoxLayout())
                     qlabel_ = QLabel(defs_props[prop_key_]['title'])
-                    qlabel_.setToolTip(defs_props[prop_key_]['description'])
-                    qlabel_.setToolTipDuration(3000)
+                    try:
+                        qlabel_.setToolTip(defs_props[prop_key_]['description'])
+                        qlabel_.setToolTipDuration(3000)
+                    except KeyError:
+                        pass
                     container.layout().addWidget(qlabel_)
 
                     container.layout().addWidget(widget_dict[prop_key][prop_key_])
@@ -542,8 +545,11 @@ class TasksQWidget(QWidget):
                 container = QWidget()
                 container.setLayout(QHBoxLayout())
                 qlabel_ = QLabel(task_properties[prop_key]['title'])
-                qlabel_.setToolTip(task_properties[prop_key]['description'])
-                qlabel_.setToolTipDuration(3000)
+                try:
+                    qlabel_.setToolTip(task_properties[prop_key]['description'])
+                    qlabel_.setToolTipDuration(3000)
+                except KeyError:
+                    pass
                 container.layout().addWidget(qlabel_)
 
                 container.layout().addWidget(widget_dict[prop_key])
