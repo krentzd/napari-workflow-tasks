@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 # TODO: Automatically decide what properties to ignore based on MANIFEST
 IGNORE_PROPERTIES = ['zarr_url', 'channels_to_include', 'channels_to_exclude', 'measure_texture'] #, 'channel'
+INCLUDE_CATEGORIES = ["Segmentation", "Measurement"]
 
 def wipe_cache():
     from napari.utils import resize_dask_cache
@@ -278,7 +279,7 @@ class TasksQWidget(QWidget):
 
         select_workflow_container = QWidget()
         select_workflow_container.setLayout(QHBoxLayout())
-        workflow_label = QLabel("Select workflow:")
+        workflow_label = QLabel("Select task:")
         workflow_label.setFont(QFont('Arial', 14, weight=QFont.Bold))
         select_workflow_container.layout().addWidget(workflow_label)
 
@@ -343,15 +344,16 @@ class TasksQWidget(QWidget):
         workflow_args = self._get_json_params(path_to_workflow)
 
         for task in workflow_args["task_list"]:
-            self.workflow_combo_box.addItem(task["name"])
-            self.task_manager.add_task(name=task["name"],
-                                       parent_dir=os.path.split(path_to_workflow)[0],
-                                       executable_parallel=task["executable_parallel"],
-                                       properties=task["args_schema_parallel"]["properties"],
-                                       defs=task["args_schema_parallel"].get("$defs", None),
-                                       required=task["args_schema_parallel"]["required"],
-                                       type=task["args_schema_parallel"]["type"],
-                                       title=task["args_schema_parallel"]["title"])
+            if task.get("category") in INCLUDE_CATEGORIES:
+                self.workflow_combo_box.addItem(task["name"])
+                self.task_manager.add_task(name=task["name"],
+                                           parent_dir=os.path.split(path_to_workflow)[0],
+                                           executable_parallel=task["executable_parallel"],
+                                           properties=task["args_schema_parallel"]["properties"],
+                                           defs=task["args_schema_parallel"].get("$defs", None),
+                                           required=task["args_schema_parallel"]["required"],
+                                           type=task["args_schema_parallel"]["type"],
+                                           title=task["args_schema_parallel"]["title"])
 
     def _fetch_subprocess_output(self, task_name):
         print(f'Received task_name={task_name}')
@@ -361,6 +363,7 @@ class TasksQWidget(QWidget):
             props = self.task_manager.get_properties(task_name)
             path_to_zarr = props['zarr_url']['value']
 
+            # Maybe we can allow the user to select this from a drop-down menu of all possible fields?
             if task_name == 'Thresholding Label Task':
                 out_layer_name = props['label_name']['value']
             elif task_name == 'Cellpose Segmentation':
