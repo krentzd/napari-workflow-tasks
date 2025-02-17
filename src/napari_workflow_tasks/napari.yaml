@@ -38,4 +38,4 @@ contributions:
       key: unique_id.1
   widgets:
     - command: napari-workflow-tasks.make_qwidget
-      display_name: OME Tasks
+      display_name: Napari Fractal Task
