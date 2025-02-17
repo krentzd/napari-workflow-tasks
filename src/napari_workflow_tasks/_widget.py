@@ -273,7 +273,7 @@ class TasksQWidget(QWidget):
         self.workflow_adder_container = QWidget()
         self.workflow_adder_container.setLayout(QVBoxLayout())
 
-        self.workflow_adder_btn = QPushButton("Add workflow")
+        self.workflow_adder_btn = QPushButton("Add task package")
         self.workflow_adder_btn.clicked.connect(self._select_workflow_file)
         self.workflow_adder_container.layout().addWidget(self.workflow_adder_btn)
 
