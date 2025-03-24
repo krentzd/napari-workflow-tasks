@@ -50,5 +50,5 @@ pip install -e .
 
 ## Scope limits
 
-- Currently only works for Segmentation, Image Processing(?) and Measurement tasks
+- Currently only works for Segmentation, Image Processing and Measurement tasks
 - Requires tasks packages to be installed in the same environment as napari
