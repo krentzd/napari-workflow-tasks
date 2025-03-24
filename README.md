@@ -1,7 +1,7 @@
 # napari-fractal-tasks
 Interact with fractal tasks in napari
 
-Prototype developed at the 2024 
+Prototype developed at the 2024 OME-NGFF workflows hackathon. 
 
 ## Installation
 
@@ -52,3 +52,13 @@ pip install -e .
 
 - Currently only works for Segmentation, Image Processing and Measurement tasks
 - Requires tasks packages to be installed in the same environment as napari
+
+## How to cite 
+```bibtex
+@article{luthi20252024,
+  title={2024 OME-NGFF workflows hackathon},
+  author={L{\"u}thi, Joel and Albert, Marvin and Anita, Liviu and Babalola, Kola and Bennett, Davis and Bogovic, John A and Cerrone, Lorenzo and Dornier, R{\'e}my and Eglinger, Jan and Galinova, Vera and others},
+  year={2025},
+  publisher={OSF}
+}
+```
