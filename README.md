@@ -1,7 +1,7 @@
 # napari-fractal-tasks
 Interact with fractal tasks in napari
 
-Prototype developed at the 2024 OME-NGFF workflows hackathon. 
+Prototype developed at the [2024 OME-NGFF workflows hackathon](https://doi.org/10.37044/osf.io/5uhwz_v2) . 
 
 ## Installation
 
