@@ -19,6 +19,7 @@ if __name__ == "__main__":
     parser.add_argument('--path_to_task_args', type=str)
 
     args = parser.parse_args()
+    print(args)
 
     with open(args.path_to_task_args) as f:
         task_args = json.load(f)
