@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 from qtpy.QtWidgets import (QHBoxLayout, QPushButton, QWidget, QTabWidget,
                             QVBoxLayout, QLabel,
                             QLineEdit, QFileDialog, QCheckBox, QComboBox,
-                            QGroupBox)
+                            QGroupBox, QScrollArea)
 from qtpy.QtGui import QPixmap, QFont
 from qtpy.QtCore import Qt
 
@@ -348,12 +348,19 @@ class TasksQWidget(QWidget):
 
         ### Core widget components
         self.main_container = QWidget()
-        main_layout = QVBoxLayout()
+        main_layout = QVBoxLayout(self.main_container)
         main_layout.setSpacing(15)
         main_layout.setContentsMargins(15, 15, 15, 15)
-        self.main_container.setLayout(main_layout)
         self.main_container.setMinimumWidth(400)
-        self.main_container.setFixedHeight(900)
+        # self.main_container.setMaximumHeight(900)
+
+        # Wrap the content widget in a QScrollArea
+        main_scroll = QScrollArea()
+        main_scroll.setWidgetResizable(True)  
+        main_scroll.setWidget(self.main_container)
+
+        self.tab_container = QTabWidget()
+        self.tab_container.addTab(main_scroll, "Main")
 
         # ---------------- Title & Logo ----------------
         main_title = QLabel("Fractal Task Launcher")
@@ -380,7 +387,7 @@ class TasksQWidget(QWidget):
 
         # ---------------- Crop to ROI section ----------------
         crop_container = QGroupBox("(Optional) Custom ROI selection")
-        crop_container.setMinimumHeight(150)
+        crop_container.setMinimumHeight(180)
         crop_layout = QVBoxLayout()
         crop_layout.setSpacing(10)
         crop_layout.setContentsMargins(15, 15, 15, 15)
@@ -447,11 +454,6 @@ class TasksQWidget(QWidget):
         main_layout.addWidget(workflow_container)
         main_layout.addWidget(task_adder_container)
         main_layout.addStretch(1)  # pushes everything up nicely
-
-
-        # ---------------- Tab container ----------------
-        self.tab_container = QTabWidget()
-        self.tab_container.addTab(self.main_container, "Main")
 
         self.setLayout(QHBoxLayout())
         self.layout().addWidget(self.tab_container)
@@ -612,7 +614,10 @@ class TasksQWidget(QWidget):
     def _add_task_tab(self, task_name):
         task_container = QTabWidget(objectName=f'{task_name}')
         main_container = QWidget(objectName=f'{task_name}_main')
-        main_container.setLayout(QVBoxLayout())
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_container.setLayout(main_layout)
 
         task_properties = self.task_manager.get_properties(task_name)
 
@@ -710,7 +715,12 @@ class TasksQWidget(QWidget):
                     container.layout().addWidget(widget_dict[prop_key][prop_key_])
                     outer_container.layout().addWidget(container)
 
-                task_container.addTab(outer_container, task_properties[prop_key]['title'])
+                # Wrap object-tab content in a scroll area
+                object_scroll = QScrollArea()
+                object_scroll.setWidgetResizable(True)
+                object_scroll.setWidget(outer_container)
+
+                task_container.addTab(object_scroll, task_properties[prop_key]['title'])
 
             else:
                 container = QWidget()
@@ -735,9 +745,13 @@ class TasksQWidget(QWidget):
         task_close_button = QPushButton("Remove task")
         task_close_button.clicked.connect(lambda: self._close_tab(task_name))
         main_container.layout().addWidget(task_close_button)
+        
+        task_main_scroll = QScrollArea()
+        task_main_scroll.setWidgetResizable(True)
+        task_main_scroll.setWidget(main_container)
 
-        task_container.addTab(main_container, "Main")
-
+        # Add the scroll area as the Main tab content
+        task_container.addTab(task_main_scroll, "Main")
         self.tab_container.addTab(task_container, task_name)
 
     def _close_tab(self, task_name):
