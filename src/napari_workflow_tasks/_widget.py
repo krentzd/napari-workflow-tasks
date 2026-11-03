@@ -4,19 +4,24 @@ from typing import TYPE_CHECKING
 from qtpy.QtWidgets import (QHBoxLayout, QPushButton, QWidget, QTabWidget,
                             QVBoxLayout, QLabel,
                             QLineEdit, QFileDialog, QCheckBox, QComboBox,
-                            QGroupBox)
+                            QGroupBox, QScrollArea, QPlainTextEdit,
+                            QProgressBar)
 from qtpy.QtGui import QPixmap, QFont
 from qtpy.QtCore import Qt
 
 from PyQt5.QtCore import QObject, QThread, pyqtSignal, pyqtSlot
 from PyQt5.QtWidgets import QLineEdit, QCheckBox, QMessageBox
 
+import ast
 import json
 import subprocess
 import os
+import time
 
 import napari
 from napari.layers import Shapes
+from napari.qt.threading import create_worker
+from napari.utils.notifications import show_error, show_info
 from napari_ome_zarr._reader import napari_get_reader
 
 import dask.array as da
@@ -33,6 +38,9 @@ logger.setLevel(logging.INFO)
 from .io_utils import PackageImporter
 
 from .pixi_utils import pixi_runner
+from ._catalog_panel import CatalogPanel
+from .catalog import find_pixi, task_type
+from ._schema_form import ListField, SchemaError, SchemaForm, _Collapsible
 
 if TYPE_CHECKING:
     import napari
@@ -42,6 +50,154 @@ if TYPE_CHECKING:
 # TODO: Automatically decide what properties to ignore based on MANIFEST
 IGNORE_PROPERTIES = ['zarr_url', 'channels_to_include', 'channels_to_exclude', 'measure_texture'] #, 'channel'
 INCLUDE_CATEGORIES = ["Segmentation", "Measurement"]
+
+# ---------------------------------------------------------------------------
+# Converting text-box input into JSON values matching the task's JSON Schema
+# ---------------------------------------------------------------------------
+
+# Sentinel for "no value given": the argument is omitted from the args JSON,
+# so the task (pydantic) applies its own default.
+MISSING = object()
+
+
+def _is_ref_value(value):
+    return isinstance(value, dict) and set(value) == {'args', 'type'}
+
+
+def _schema_types(schema):
+    """All JSON types a property accepts (handles anyOf/oneOf/$ref)."""
+    t = schema.get('type')
+    types = set(t) if isinstance(t, list) else ({t} if t else set())
+    for sub in schema.get('anyOf', []) + schema.get('oneOf', []):
+        if 'type' in sub:
+            types.add(sub['type'])
+        if '$ref' in sub:
+            types.add('object')
+    if '$ref' in schema or 'oneOf' in schema or 'allOf' in schema:
+        types.add('object')
+    return types
+
+
+def _parse_literal(text):
+    """Parse JSON (or Python-literal) text; return MISSING if impossible."""
+    for loader in (json.loads, ast.literal_eval):
+        try:
+            return loader(text)
+        except (ValueError, SyntaxError, TypeError):
+            pass
+    return MISSING
+
+
+def _convert_scalar(text, types):
+    if 'integer' in types:
+        try:
+            return int(text)
+        except ValueError:
+            pass
+    if 'number' in types or 'float' in types:
+        try:
+            return float(text)
+        except ValueError:
+            pass
+    if 'boolean' in types and text.lower() in ('true', 'false'):
+        return text.lower() == 'true'
+    return text
+
+
+def parse_text_value(text, schema):
+    """Turn the text of a QLineEdit into a value valid for ``schema``."""
+    text = text.strip()
+    if text in ('', 'None', 'null'):
+        return MISSING
+
+    types = _schema_types(schema)
+
+    if 'array' in types:
+        if text.startswith('['):
+            value = _parse_literal(text)
+            if value is not MISSING:
+                return value
+        # Comma-separated list, e.g. "DAPI, nanog"
+        item_types = _schema_types(schema.get('items', {})) or {'string'}
+        return [
+            _convert_scalar(x.strip(), item_types)
+            for x in text.split(',') if x.strip()
+        ]
+
+    if 'object' in types or not types:
+        if text[0] in '{[' or not types:
+            value = _parse_literal(text)
+            if value is not MISSING:
+                return value
+        if 'string' not in types and types:
+            return MISSING
+
+    return _convert_scalar(text, types)
+
+
+def _list_labels(zarr_url):
+    """Label names of an OME-Zarr image (NGFF v0.4 or v0.5), [] if none."""
+    labels_dir = Path(zarr_url) / 'labels'
+    for fname, keys in (('.zattrs', ('labels',)), ('zarr.json', ('attributes', 'ome', 'labels'))):
+        try:
+            with open(labels_dir / fname) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for key in keys:
+            data = data.get(key, {}) if isinstance(data, dict) else {}
+        if isinstance(data, list):
+            return data
+    return []
+
+
+# Fields that take channel names: offer the input image's channels
+CHANNEL_FIELDS = ('identifiers', 'label', 'channel_label', 'channel_labels')
+
+
+def _channel_labels(zarr_url):
+    """Channel labels from the OME-Zarr "omero" metadata (v0.4 / v0.5)."""
+    root = Path(zarr_url)
+    for fname, keys in (('.zattrs', ('omero',)), ('zarr.json', ('attributes', 'ome', 'omero'))):
+        try:
+            with open(root / fname) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for key in keys:
+            data = data.get(key, {}) if isinstance(data, dict) else {}
+        channels = data.get('channels', []) if isinstance(data, dict) else []
+        labels = [c.get('label') for c in channels if isinstance(c, dict) and c.get('label')]
+        if labels:
+            return labels
+    return []
+
+
+def _prefill_channel(fields, layer_name, channels):
+    """Fill empty, required channel-identifier lists with the input layer's
+    channel (napari-ome-zarr names image layers after their channel)."""
+    if not layer_name or layer_name not in channels:
+        return
+    for key, field in fields.items():
+        inner = getattr(field, 'form', None)
+        if inner is not None:
+            _prefill_channel(inner.fields, layer_name, channels)
+        elif key == 'identifiers' and isinstance(field, ListField) and field.required:
+            if not field.edit.text().strip():
+                field.set_value([layer_name])
+
+
+def _stream_process(cmd):
+    """Run a command, yielding its output lines; returns the exit code."""
+    env = dict(os.environ, PYTHONUNBUFFERED='1')
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, env=env,
+    )
+    for line in proc.stdout:
+        yield line.rstrip('\n')
+    return proc.wait()
+
 
 def wipe_cache():
     from napari.utils import resize_dask_cache
@@ -86,12 +242,21 @@ class FractalTaskManager:
         defs,
         required,
         type,
-        title
+        title,
+        base_name=None,
+        version=None,
+        docs_info=None,
+        docs_link=None,
     ):
-
+        # `name` is the unique key (e.g. "Cellpose Segmentation
+        # [fractal-tasks-core==1.4.0]"); `base_name` is the manifest name.
 
         task_dict = dict(
             title=title,
+            base_name=base_name or name,
+            version=version,
+            docs_info=docs_info,
+            docs_link=docs_link,
             package_name=package_name,
             parent_dir=parent_dir,
             executable_parallel=executable_parallel,
@@ -163,11 +328,20 @@ class FractalTaskManager:
         path_to_json = os.path.join(parent_dir, f'{title}.json')
 
         args_dict = dict()
-        for prop_key in self.tasks[name]['properties'].keys():
-            if 'value' in self.tasks[name]['properties'][prop_key]:
-                args_dict[prop_key] = self.tasks[name]['properties'][prop_key]['value']
-                if isinstance(args_dict[prop_key], dict):
-                    args_dict[prop_key] = args_dict[prop_key]['args']
+        for prop_key, schema in self.tasks[name]['properties'].items():
+            if 'value' not in schema:
+                continue
+            value = schema['value']
+            if _is_ref_value(value):
+                # Nested model: {'args': {...}, 'type': <model title>}
+                value = value['args']
+            if value is MISSING:
+                # Left empty / "None": let the task use its own default
+                continue
+            if 'default' in schema and value == schema['default']:
+                # Unchanged default: omit, so the task's own default applies
+                continue
+            args_dict[prop_key] = value
 
         with open(path_to_json, 'w') as f:
             json.dump(args_dict, f)
@@ -214,69 +388,31 @@ class FractalTaskManager:
     ):
 
         widget = self.tasks[name]['widget_dict'][property]
+        schema = self.tasks[name]['properties'][property]
 
         if isinstance(widget, QLineEdit):
-            value = widget.text()
-            if value == "":
-                return None
-            else:
-                try:
-                    type = self.tasks[name]['properties'][property]['type']
-
-                    if type == 'integer':
-                        return int(value)
-                    elif type == 'float':
-                        return float(value)
-                    else:
-                        return value
-                except KeyError:
-                    return value
+            return parse_text_value(widget.text(), schema)
 
         elif isinstance(widget, QCheckBox):
-            if widget.isChecked():
-                return True
-            else:
-                return False
-
-
+            return widget.isChecked()
 
         elif isinstance(widget, dict):
             args_dict = dict()
-            ref = os.path.split(self.tasks[name]['properties'][property]['$ref'])[-1]
+            ref = os.path.split(schema['$ref'])[-1]
             defs = self.get_defs(name)
             defs_props = defs[ref]['properties']
 
             for key in widget.keys():
                 if isinstance(widget[key], QLineEdit):
-                    value = widget[key].text()
-                    if value == "":
-                        args_dict[key] = None
-                    else:
-                        try:
-                            # type = self.tasks[name]['defs'][ref][key]['type']
-                            type = defs_props[key]['type']
-                            print(name, property, key, type)
-
-                            if type == 'integer':
-                                args_dict[key] = int(value)
-                            elif type == 'float':
-                                args_dict[key] = float(value)
-                            elif type == 'array':
-                                print('Array type detected', [str(x) for x in value.split(',')])
-                                args_dict[key] = [str(x) for x in value.split(',')]
-                            else:
-                                args_dict[key] = value
-                        except KeyError:
-                            args_dict[key] = value
+                    value = parse_text_value(widget[key].text(), defs_props.get(key, {}))
+                    if value is not MISSING:
+                        args_dict[key] = value
 
                 elif isinstance(widget[key], QCheckBox):
-                    if widget[key].isChecked():
-                        args_dict[key] = True
-                    else:
-                        args_dict[key] = False
+                    args_dict[key] = widget[key].isChecked()
 
             return_dict = dict(args=args_dict,
-                               type=self.tasks[name]['defs'][ref]['title'])
+                               type=defs[ref]['title'])
 
             return return_dict
 
@@ -340,6 +476,8 @@ class TasksQWidget(QWidget):
         super().__init__()
         self._viewer = napari_viewer
         self.exec_btn_dict = dict()
+        self._task_ui = dict()       # task key -> widgets of its tab
+        self._task_workers = []      # running task processes
         self.task_manager = FractalTaskManager()
 
         # ---------------- Main container ----------------
@@ -353,7 +491,6 @@ class TasksQWidget(QWidget):
         main_layout.setContentsMargins(15, 15, 15, 15)
         self.main_container.setLayout(main_layout)
         self.main_container.setMinimumWidth(400)
-        self.main_container.setFixedHeight(900)
 
         # ---------------- Title & Logo ----------------
         main_title = QLabel("Fractal Task Launcher")
@@ -429,6 +566,10 @@ class TasksQWidget(QWidget):
         select_workflow_container.layout().addWidget(self.workflow_combo_box)
         workflow_layout.addWidget(select_workflow_container)
 
+        # ---------------- Fractal task catalog ----------------
+        self.catalog_panel = CatalogPanel(self)
+        self.catalog_panel.installed.connect(self._on_catalog_installed)
+
         # ---------------- Task Adder Section ----------------
         task_adder_container = QGroupBox("Add Task")
         task_adder_layout = QHBoxLayout()
@@ -444,6 +585,7 @@ class TasksQWidget(QWidget):
         main_layout.addWidget(icon_img_container)
         main_layout.addWidget(image_input_container)
         main_layout.addWidget(crop_container)
+        main_layout.addWidget(self.catalog_panel)
         main_layout.addWidget(workflow_container)
         main_layout.addWidget(task_adder_container)
         main_layout.addStretch(1)  # pushes everything up nicely
@@ -451,12 +593,18 @@ class TasksQWidget(QWidget):
 
         # ---------------- Tab container ----------------
         self.tab_container = QTabWidget()
-        self.tab_container.addTab(self.main_container, "Main")
+        main_scroll = QScrollArea()
+        main_scroll.setWidgetResizable(True)
+        main_scroll.setWidget(self.main_container)
+        self.tab_container.addTab(main_scroll, "Main")
 
         self.setLayout(QHBoxLayout())
         self.layout().addWidget(self.tab_container)
 
         self._update_combo_boxes()
+        # Keep the input dropdown in sync with the viewer (e.g. task results)
+        self._viewer.layers.events.inserted.connect(lambda _e: self._update_combo_boxes())
+        self._viewer.layers.events.removed.connect(lambda _e: self._update_combo_boxes())
 
     def _update_combo_boxes(self):
         for layer_name in [self._image_layers.itemText(i) for i in range(self._image_layers.count())]:
@@ -497,259 +645,386 @@ class TasksQWidget(QWidget):
                                            type=task["args_schema_parallel"]["type"],
                                            title=task["args_schema_parallel"]["title"])
 
+    def _on_catalog_installed(self, pkg, version, info, entry, selected_task):
+        """Register an installed (package, version) and open the chosen task."""
+        package_key = f"{pkg.pkg_name}=={version}"
+        self.package_importer.loaded_packages[package_key] = entry
+
+        # Prefer the manifest of the installed package; fall back to the wheel's
+        try:
+            manifest = self._get_json_params(entry['manifest_path'])
+        except OSError:
+            manifest = info.manifest
+
+        selected_key = None
+        for task in manifest["task_list"]:
+            if task_type(task) != "parallel":
+                continue
+            key = f"{task['name']} [{package_key}]"
+            if key not in self.task_manager.tasks:
+                schema = task["args_schema_parallel"]
+                self.task_manager.add_task(
+                    name=key,
+                    base_name=task["name"],
+                    version=version,
+                    package_name=package_key,
+                    parent_dir=entry["src_path"],
+                    executable_parallel=task["executable_parallel"],
+                    properties=schema["properties"],
+                    defs=schema.get("$defs", None),
+                    required=schema.get("required", []),
+                    type=schema.get("type"),
+                    title=schema.get("title", task["name"]),
+                    docs_info=task.get("docs_info"),
+                    docs_link=task.get("docs_link"),
+                )
+                self.workflow_combo_box.addItem(key)
+            if task["name"] == selected_task:
+                selected_key = key
+
+        if selected_key is not None:
+            self.workflow_combo_box.setCurrentText(selected_key)
+            self._add_task()
+
     def _fetch_subprocess_output(self, task_name):
+        """Show what a task produced: new/updated labels and new images."""
         logger.info(f'Received task_name={task_name}')
-        if task_name in ['Thresholding Label Task', 'Cellpose Segmentation', 'Cellpose SAM Segmentation']:
-            wipe_cache()
-            # Remove and reload zarr
-            props = self.task_manager.get_properties(task_name)
-            path_to_zarr = props['zarr_url']['value']
+        wipe_cache()
+        props = self.task_manager.get_properties(task_name)
+        path_to_zarr = props['zarr_url']['value']
 
-            # Maybe we can allow the user to select this from a drop-down menu of all possible fields?
-            if task_name in ['Thresholding Label Task', 'Cellpose SAM Segmentation']:
-                out_layer_name = props['label_name']['value']
-            elif task_name == 'Cellpose Segmentation':
-                out_layer_name = props['output_label_name']['value']
+        # 1. Labels written into the input image: new ones, plus the
+        #    task's output-label argument (covers overwriting an existing one)
+        labels_after = set(_list_labels(path_to_zarr))
+        label_names = labels_after - getattr(self, '_labels_before', set())
+        out_label = self._output_label_name(task_name)
+        if out_label in labels_after:
+            label_names.add(out_label)
 
-            for layer in self._viewer.layers:
-                if isinstance(layer, napari.layers.Labels):
-                    self._viewer.layers.remove(layer.name)
+        # 2. New images reported by the task (e.g. "0_gaussian_blur"), from
+        #    the "image_list_updates" in the task's --out-json file
+        out_json = os.path.join(
+            os.path.dirname(self.task_manager.get_path_to_json(task_name)),
+            "out_file.json",
+        )
+        new_zarr_urls = []
+        if os.path.exists(out_json):
+            try:
+                with open(out_json) as f:
+                    metadata = json.load(f) or {}
+            except (OSError, ValueError):
+                metadata = {}
+            for update in metadata.get('image_list_updates', []):
+                url = update.get('zarr_url')
+                if url and os.path.normpath(url) != os.path.normpath(path_to_zarr):
+                    new_zarr_urls.append(url)
 
-            zarr_layer_data = napari_get_reader(path_to_zarr)()
-            for layer_data in zarr_layer_data:
-                if layer_data[-1] == 'labels':
-                    layer = napari.layers.Layer.create(*layer_data)
-                    if layer.name == out_layer_name:
-                        layer.visible = True
-                        self._viewer.add_layer(layer)
+        shown = []
+        if label_names:
+            shown += self._load_zarr_layers(path_to_zarr, labels=label_names)
+        for url in new_zarr_urls:
+            shown += self._load_zarr_layers(url, suffix=os.path.basename(url))
 
-        # self.thread.quit()
-        # self.worker.deleteLater()
-        # self.thread.deleteLater()
+        if shown:
+            show_info(f"{task_name}: added {', '.join(shown)}")
+        else:
+            show_info(f"{task_name} finished (nothing new to display).")
 
         self._update_execute_buttons(is_enabled=True)
+
+    def _output_label_name(self, task_name):
+        """Resolve the task's output label argument, if it has one."""
+        props = self.task_manager.get_properties(task_name)
+        for key in ('label_name', 'output_label_name'):
+            if key not in props:
+                continue
+            name = props[key].get('value', MISSING)
+            if name is MISSING or name is None:
+                name = props[key].get('default')
+            if isinstance(name, str) and '{channel_identifier}' in name:
+                # e.g. "{channel_identifier}_segmented" -> "DAPI_segmented"
+                channels = props.get('channels', {}).get('value')
+                if _is_ref_value(channels):
+                    channels = channels['args']
+                identifiers = channels.get('identifiers') if isinstance(channels, dict) else None
+                identifier = identifiers[0] if identifiers else self._image_layers.currentText()
+                name = name.replace('{channel_identifier}', str(identifier))
+            return name
+        return None
+
+    def _load_zarr_layers(self, zarr_url, labels=None, suffix=None):
+        """
+        Add layers of an OME-Zarr image to the viewer.
+
+        labels: only add these label layers (and no image layers).
+        suffix: add everything, naming layers "<name> [<suffix>]".
+        """
+        reader = napari_get_reader(zarr_url)
+        if reader is None:
+            logger.warning(f'Cannot read {zarr_url}')
+            return []
+        added = []
+        for layer_data in reader(zarr_url):
+            data = layer_data[0]
+            meta = dict(layer_data[1]) if len(layer_data) > 1 else {}
+            layer_type = layer_data[2] if len(layer_data) > 2 else 'image'
+            if labels is not None:
+                if layer_type != 'labels' or meta.get('name') not in labels:
+                    continue
+
+            # Names may be a list (one per channel)
+            names = meta.get('name')
+            if suffix and names is not None:
+                if isinstance(names, (list, tuple)):
+                    names = [f'{n} [{suffix}]' for n in names]
+                else:
+                    names = f'{names} [{suffix}]'
+                meta['name'] = names
+
+            # Replace stale layers with the same name(s)
+            for n in names if isinstance(names, (list, tuple)) else [names]:
+                if n is not None and n in self._viewer.layers:
+                    self._viewer.layers.remove(n)
+
+            new_layers = getattr(self._viewer, f'add_{layer_type}')(data, **meta)
+            if not isinstance(new_layers, list):
+                new_layers = [new_layers]
+            for layer in new_layers:
+                layer.visible = True
+                # Lets the layer be used as input for the next task
+                layer.metadata['zarr_url'] = zarr_url
+                added.append(layer.name)
+        return added
 
     def _update_execute_buttons(self, is_enabled=True):
         for name in self.exec_btn_dict.keys():
             self.exec_btn_dict[name].setEnabled(is_enabled)
 
+    # ------------------------------------------------------------------
+    # Running a task (in the background, with a live log)
+    # ------------------------------------------------------------------
+
+    def _selected_zarr_url(self):
+        name = self._image_layers.currentText()
+        if not name or name not in self._viewer.layers:
+            return None
+        layer = self._viewer.layers[name]
+        return layer.source.path or layer.metadata.get('zarr_url')
+
     def _execute_task(self, task_name):
-        selected_layer = self._viewer.layers[self._image_layers.currentText()]
-        path_to_zarr = selected_layer.source.path
-        self.task_manager.update_task_property(task_name, 'zarr_url', path_to_zarr)
+        ui = self._task_ui[task_name]
+        path_to_zarr = self._selected_zarr_url()
+        if not path_to_zarr:
+            show_error("Select an OME-Zarr image layer as input (Main tab).")
+            return
 
-        # TODO: This should be set from Zarr metadata file
-        self.task_manager.update_task_property(task_name, 'channel', self._image_layers.currentText())
+        try:
+            args = ui['form'].get_args()
+        except SchemaError as e:
+            ui['status'].setText(f"⚠ {e}")
+            show_error(f"{self.task_manager.get_task(task_name)['base_name']}: {e}")
+            return
+        args['zarr_url'] = path_to_zarr
 
-        task_properties = self.task_manager.get_properties(task_name)
-        for property in [k for k in task_properties.keys() if k not in IGNORE_PROPERTIES]:
-            value = self.task_manager.get_widget_value(task_name, property)
-            self.task_manager.update_task_property(task_name, property, value)
+        # Keep the values: used to find the outputs after the run
+        for key, prop in self.task_manager.get_properties(task_name).items():
+            prop['value'] = args.get(key, MISSING)
 
-        self.task_manager.write_to_json(task_name)
+        path_to_task_args = self.task_manager.get_path_to_json(task_name)
+        with open(path_to_task_args, 'w') as f:
+            json.dump(args, f, indent=1)
+        out_json = os.path.join(os.path.dirname(path_to_task_args), "out_file.json")
+        if os.path.exists(out_json):
+            os.remove(out_json)
 
-        # Launch subprocess in separate thread to avoid GUI freezing
-        # TODO: Only launch new thread once existing thread deleted
-        # while not thread_exists:
-        #   create new thread
-        self._update_execute_buttons(is_enabled=False)
-
+        # Remember existing labels so new ones can be shown after the run
+        self._labels_before = set(_list_labels(path_to_zarr))
 
         package_name = self.task_manager.get_package_name(task_name)
         manifest_path = self.package_importer.loaded_packages[package_name]['pixi_manifest_path']
-        print('Launching subprocess...')
-        path_to_executable = self.task_manager.get_executable_path(task_name)
-        print(path_to_executable)
+        try:
+            pixi = find_pixi()
+        except FileNotFoundError as e:
+            show_error(str(e))
+            return
+        cmd = [
+            pixi, 'run', '--manifest-path', manifest_path,
+            'python', self.task_manager.get_executable_path(task_name),
+            '--args-json', path_to_task_args, '--out-json', out_json,
+        ]
 
-        path_to_task_args = self.task_manager.get_path_to_json(task_name)
+        self._update_execute_buttons(is_enabled=False)
+        ui['log'].clear()
+        ui['log'].appendPlainText(f"$ {' '.join(cmd)}\n")
+        ui['progress'].setVisible(True)
+        ui['status'].setText(f"Running on {os.path.basename(path_to_zarr)}…")
+        ui['t0'] = time.monotonic()
 
-        # self.thread.start()
-        # print(f'pixi run --manifest-path {manifest_path} python {os.path.join(os.path.dirname(__file__), "task_wrapper.py")} --executable {path_to_executable} --path_to_task_args {path_to_task_args}')
-        # p = subprocess.Popen(f'pixi run --manifest-path {manifest_path} python {os.path.join(os.path.dirname(__file__), "task_wrapper.py")} --executable {path_to_executable} --path_to_task_args {path_to_task_args}', shell=True) #Pass wrapper_args: path to executable
-        # print(f'pixi run --manifest-path {manifest_path} python {path_to_executable} --args-json {path_to_task_args} --out-json out-json-file.json')
-        # p = subprocess.Popen(f'pixi run --manifest-path {manifest_path} python {os.path.join(os.path.dirname(__file__), "task_wrapper.py")} --executable {path_to_executable} --path_to_task_args {path_to_task_args}', shell=True) #Pass wrapper_args: path to executable
-        if os.path.exists(os.path.join(os.path.split(path_to_task_args)[0], "out_file.json")):
-            os.remove(os.path.join(os.path.split(path_to_task_args)[0], "out_file.json"))
-        p = subprocess.Popen(f'pixi run --manifest-path {manifest_path} python {path_to_executable} --args-json {path_to_task_args} --out-json {os.path.join(os.path.split(path_to_task_args)[0], "out_file.json")}', shell=True) #Pass wrapper_args: path to executable
+        worker = create_worker(_stream_process, cmd)
+        worker.yielded.connect(ui['log'].appendPlainText)
+        worker.returned.connect(lambda rc: self._on_task_finished(task_name, rc))
+        worker.errored.connect(lambda e: self._on_task_finished(task_name, -1, e))
+        self._task_workers.append(worker)
+        worker.finished.connect(lambda w=worker: self._task_workers.remove(w))
+        worker.start()
 
-        p.wait()
+    def _on_task_finished(self, task_name, returncode, error=None):
+        ui = self._task_ui.get(task_name)
+        self._update_execute_buttons(is_enabled=True)
+        if ui is None:  # tab closed while running
+            return
+        ui['progress'].setVisible(False)
+        elapsed = time.monotonic() - ui.get('t0', time.monotonic())
+        if returncode == 0:
+            ui['status'].setText(f"✓ Finished in {elapsed:.0f} s")
+            self._fetch_subprocess_output(task_name)
+        else:
+            lines = ui['log'].toPlainText().strip().splitlines()
+            last = str(error) if error else (lines[-1] if lines else "")
+            ui['status'].setText(f"✗ Failed after {elapsed:.0f} s: {last[:200]}")
+            ui['log_section'].button.setChecked(True)
+            show_error(f"{self.task_manager.get_task(task_name)['base_name']} failed: {last[:300]}")
 
-        print('Finished running subprocess')
-        self._fetch_subprocess_output(task_name)
-        # self.thread = QThread(parent=self)
-        # self.worker = TaskWorker()
-        # self.worker.task_name = task_name
-        # self.worker.manifest_path = self.package_importer.loaded_packages[package_name]['pixi_manifest_path']
-        # self.worker.task_manager = self.task_manager
-        # self.worker.moveToThread(self.thread)
-        #
-        # self.thread.started.connect(self.worker.run)
-        # self.worker.finished.connect(self._fetch_subprocess_output)
-        #
-        # self.thread.start()
-        # QLabel describing state of progress
-        # self.thread.finished.connect(
-        #     lambda: self.stepLabel.setText("Long-Running Step: 0")
-        # )
-        #
+    # ------------------------------------------------------------------
+    # Task tabs
+    # ------------------------------------------------------------------
 
     def _task_tab_exists(self, task_name):
-        for child_widget in self.tab_container.findChildren(QWidget):
-            if isinstance(child_widget, QWidget):
-                if child_widget.objectName() == task_name:
-                    return True
-        return False
+        return task_name in self._task_ui
 
     def _add_task(self):
         task_name = self.workflow_combo_box.currentText()
-
+        if not task_name:
+            return
         if self._task_tab_exists(task_name):
-            _widget = self.tab_container.findChild(QWidget, task_name)
-            self.tab_container.setCurrentWidget(_widget)
+            self.tab_container.setCurrentWidget(self._task_ui[task_name]['page'])
         else:
             self._add_task_tab(task_name)
 
+    def _channel_suggestions(self):
+        """Channel labels of the selected input image (for completers)."""
+        url = self._selected_zarr_url()
+        labels = _channel_labels(url) if url else []
+        current = self._image_layers.currentText()
+        if current and current not in labels:
+            labels.append(current)
+        return labels
+
     def _add_task_tab(self, task_name):
-        task_container = QTabWidget(objectName=f'{task_name}')
-        main_container = QWidget(objectName=f'{task_name}_main')
-        main_container.setLayout(QVBoxLayout())
+        task = self.task_manager.get_task(task_name)
+        schema = {
+            "type": "object",
+            "properties": task["properties"],
+            "required": task.get("required") or [],
+            "$defs": task.get("defs") or {},
+        }
 
-        task_properties = self.task_manager.get_properties(task_name)
+        page = QWidget(objectName=task_name)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(10, 10, 10, 10)
 
-        # TODO: Function to build an individual parameter widget should be separated out to enable recursive addition
-        widget_dict = dict()
-        # Automatically read zarr and enum options
-        for prop_key in task_properties.keys():
+        # Header: name, package/version, short docs
+        title = QLabel(task['base_name'])
+        title.setFont(QFont('Arial', 14, weight=QFont.Bold))
+        title.setWordWrap(True)
+        outer.addWidget(title)
+        subtitle = QLabel(task['package_name'])
+        subtitle.setStyleSheet("color: gray;")
+        outer.addWidget(subtitle)
+        docs = (task.get('docs_info') or '').strip()
+        if docs:
+            paragraphs = [p.strip() for p in docs.split('\n\n')]
+            lines = [ln for ln in '\n'.join(paragraphs).splitlines()
+                     if ln.strip() and not ln.lstrip().startswith('#')]
+            first = ' '.join(lines[:3]).strip()
+            docs_label = QLabel(first[:300] + ('…' if len(first) > 300 else ''))
+            docs_label.setWordWrap(True)
+            docs_label.setToolTip(docs[:3000])
+            outer.addWidget(docs_label)
+        if task.get('docs_link'):
+            link = QLabel(f'<a href="{task["docs_link"]}">Documentation</a>')
+            link.setOpenExternalLinks(True)
+            outer.addWidget(link)
 
-            object_name = f'{task_name}+{prop_key}'
+        input_label = QLabel()
+        input_label.setStyleSheet("color: gray;")
 
-            with_default_value = True
-            try:
-                default_value = task_properties[prop_key]['default']
-            except KeyError:
-                with_default_value = False
+        def _update_input(*_):
+            name = self._image_layers.currentText()
+            input_label.setText(f"Input: {name}" if name else "Input: (select an image in the Main tab)")
+        _update_input()
+        self._image_layers.currentTextChanged.connect(_update_input)
+        outer.addWidget(input_label)
 
-            if 'type' in task_properties[prop_key].keys() and prop_key not in IGNORE_PROPERTIES:
-                if task_properties[prop_key]['type'] in ["integer", "float", "number", "string"]:
-                    widget_dict[prop_key] = QLineEdit(objectName=object_name)
-                    if with_default_value:
-                        widget_dict[prop_key].setText(str(default_value))
+        # Parameters
+        channels = self._channel_suggestions()
+        suggestions = {k: channels for k in CHANNEL_FIELDS}
+        form = SchemaForm(schema, suggestions=suggestions)
+        _prefill_channel(form.fields, self._image_layers.currentText(), channels)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(form)
+        outer.addWidget(scroll, 1)
 
-                elif task_properties[prop_key]['type'] == "boolean":
-                    widget_dict[prop_key] = QCheckBox(objectName=object_name)
-                    if with_default_value:
-                        if default_value:
-                            widget_dict[prop_key].setChecked(True)
-                        else:
-                            widget_dict[prop_key].setChecked(False)
+        # Buttons
+        buttons = QWidget()
+        buttons_layout = QHBoxLayout(buttons)
+        buttons_layout.setContentsMargins(0, 0, 0, 0)
+        run_btn = QPushButton("▶ Run")
+        run_btn.setDefault(True)
+        run_btn.setStyleSheet("font-weight: bold;")
+        run_btn.clicked.connect(lambda: self._execute_task(task_name))
+        reset_btn = QPushButton("Reset")
+        reset_btn.setToolTip("Reset all parameters to the task defaults")
+        reset_btn.clicked.connect(form.reset)
+        close_btn = QPushButton("Remove task")
+        close_btn.clicked.connect(lambda: self._close_tab(task_name))
+        buttons_layout.addWidget(run_btn, 2)
+        buttons_layout.addWidget(reset_btn, 1)
+        buttons_layout.addWidget(close_btn, 1)
+        outer.addWidget(buttons)
 
-                elif task_properties[prop_key]['type'] == "object":
-                    pass
+        progress = QProgressBar()
+        progress.setRange(0, 0)  # busy indicator
+        progress.setTextVisible(False)
+        progress.setMaximumHeight(6)
+        progress.setVisible(False)
+        outer.addWidget(progress)
 
-            elif '$ref' in task_properties[prop_key].keys() and prop_key not in IGNORE_PROPERTIES:
-                defs = self.task_manager.get_defs(task_name)
-                ref = os.path.split(task_properties[prop_key]['$ref'])[-1]
-                defs_props = defs[ref]['properties']
+        status = QLabel("")
+        status.setWordWrap(True)
+        outer.addWidget(status)
 
-                widget_dict_ = dict()
-                for def_prop_key in defs_props.keys():
-                    object_name_ = object_name + f'+{def_prop_key}'
+        log = QPlainTextEdit()
+        log.setReadOnly(True)
+        log.setMaximumBlockCount(5000)
+        log.setFont(QFont('Menlo, Courier New', 9))
+        log.setMinimumHeight(160)
+        log_section = _Collapsible("Log", log, expanded=False)
+        outer.addWidget(log_section)
 
-                    with_default_value = True
-                    try:
-                        default_value = defs_props[def_prop_key]['default']
-                    except KeyError:
-                        with_default_value = False
+        self.exec_btn_dict[task_name] = run_btn
+        self._task_ui[task_name] = dict(
+            page=page, form=form, run_btn=run_btn, progress=progress,
+            status=status, log=log, log_section=log_section,
+        )
+        self.task_manager.add_widget_dict(task_name, form.fields)
 
-                    if 'type' in defs_props[def_prop_key].keys():
-                        if defs_props[def_prop_key]['type'] in ["integer", "float", "number", "string"]:
-                            widget_dict_[def_prop_key] = QLineEdit(objectName=object_name_)
-                            if with_default_value:
-                                widget_dict_[def_prop_key].setText(str(default_value))
-
-                        elif defs_props[def_prop_key]['type'] in ['array']:
-                            # Create as many parallel widgets as are needed
-                            widget_dict_[def_prop_key] = QLineEdit(objectName=object_name_)
-                            if with_default_value:
-                                widget_dict_[def_prop_key].setText(str(default_value))
-
-                        elif defs_props[def_prop_key]['type'] == "boolean":
-                            widget_dict_[def_prop_key] = QCheckBox(objectName=object_name_)
-                            if with_default_value:
-                                if default_value:
-                                    widget_dict_[def_prop_key].setChecked(True)
-                                else:
-                                    widget_dict_[def_prop_key].setChecked(False)
-
-                widget_dict[prop_key] = widget_dict_
-
-            elif prop_key not in IGNORE_PROPERTIES:
-                    widget_dict[prop_key] = QLineEdit(objectName=object_name)
-                    if with_default_value:
-                        widget_dict[prop_key].setText(str(default_value))
-
-        for prop_key in widget_dict.keys():
-            if isinstance(widget_dict[prop_key], dict):
-                defs = self.task_manager.get_defs(task_name)
-                ref = os.path.split(task_properties[prop_key]['$ref'])[-1]
-                defs_props = defs[ref]['properties']
-
-                outer_container = QWidget()
-                outer_container.setLayout(QVBoxLayout())
-                for prop_key_ in widget_dict[prop_key].keys():
-                    container = QWidget()
-                    container.setLayout(QHBoxLayout())
-                    qlabel_ = QLabel(defs_props[prop_key_]['title'])
-                    try:
-                        qlabel_.setToolTip(defs_props[prop_key_]['description'])
-                        qlabel_.setToolTipDuration(3000)
-                    except KeyError:
-                        pass
-                    container.layout().addWidget(qlabel_)
-
-                    container.layout().addWidget(widget_dict[prop_key][prop_key_])
-                    outer_container.layout().addWidget(container)
-
-                task_container.addTab(outer_container, task_properties[prop_key]['title'])
-
-            else:
-                container = QWidget()
-                container.setLayout(QHBoxLayout())
-                qlabel_ = QLabel(task_properties[prop_key]['title'])
-                try:
-                    qlabel_.setToolTip(task_properties[prop_key]['description'])
-                    qlabel_.setToolTipDuration(3000)
-                except KeyError:
-                    pass
-                container.layout().addWidget(qlabel_)
-
-                container.layout().addWidget(widget_dict[prop_key])
-                main_container.layout().addWidget(container)
-
-        self.task_manager.add_widget_dict(task_name, widget_dict)
-
-        self.exec_btn_dict[task_name] = QPushButton("Execute task")
-        self.exec_btn_dict[task_name].clicked.connect(lambda: self._execute_task(task_name))
-        main_container.layout().addWidget(self.exec_btn_dict[task_name])
-
-        task_close_button = QPushButton("Remove task")
-        task_close_button.clicked.connect(lambda: self._close_tab(task_name))
-        main_container.layout().addWidget(task_close_button)
-
-        task_container.addTab(main_container, "Main")
-
-        self.tab_container.addTab(task_container, task_name)
+        short = task['base_name'] if len(task['base_name']) <= 22 else task['base_name'][:21] + '…'
+        idx = self.tab_container.addTab(page, short)
+        self.tab_container.setTabToolTip(idx, task_name)
+        self.tab_container.setCurrentIndex(idx)
 
     def _close_tab(self, task_name):
-        # TODO: Explicitly handle task_manager dictionaries
+        ui = self._task_ui.pop(task_name, None)
+        self.exec_btn_dict.pop(task_name, None)
         self.task_manager.remove_widget_dict(task_name)
-
-        for child_widget in self.tab_container.findChildren(QWidget):
-            if isinstance(child_widget, QWidget):
-                if task_name in child_widget.objectName():
-                    child_widget.deleteLater()
-
-        self.tab_container.removeTab(self.tab_container.currentIndex())
+        if ui is not None:
+            idx = self.tab_container.indexOf(ui['page'])
+            if idx >= 0:
+                self.tab_container.removeTab(idx)
+            ui['page'].deleteLater()
 
     def _get_json_params(self, path_to_json):
         with open(path_to_json) as f:
