@@ -118,6 +118,12 @@ class PackageVersion:
     wheel_filename: str
     requires_python: Optional[str] = None
     yanked: bool = False
+    # Source archive of the release (sdist / GitHub tag tarball); used to
+    # install from the package's own pixi.lock, like fractal-server's pixi
+    # task collection
+    source_url: Optional[str] = None
+    source_size: Optional[int] = None
+    pixi_lock: Optional[bool] = None  # None = unknown until checked
 
     @property
     def is_prerelease(self) -> bool:
@@ -351,10 +357,18 @@ def _list_pypi_versions(project: str) -> list[PackageVersion]:
         headers={"Accept": "application/vnd.pypi.simple.v1+json"},
     )
     by_version: dict[str, list[dict]] = {}
+    sdists: dict[str, dict] = {}
+    prefix = normalize_package_name(project).replace("-", "_")
     for f in data.get("files", []):
-        if not f["filename"].endswith(".whl"):
+        name = f["filename"]
+        if name.endswith(".tar.gz"):
+            dist, _, ver = name[: -len(".tar.gz")].rpartition("-")
+            if normalize_package_name(dist).replace("-", "_") == prefix:
+                sdists[ver] = f
             continue
-        _, version = _wheel_name_version(f["filename"])
+        if not name.endswith(".whl"):
+            continue
+        _, version = _wheel_name_version(name)
         by_version.setdefault(version, []).append(f)
 
     versions = []
@@ -368,6 +382,8 @@ def _list_pypi_versions(project: str) -> list[PackageVersion]:
                 wheel_filename=f["filename"],
                 requires_python=f.get("requires-python"),
                 yanked=bool(f.get("yanked")),
+                source_url=sdists.get(version, {}).get("url"),
+                source_size=sdists.get(version, {}).get("size"),
             )
         )
     return versions
@@ -386,15 +402,53 @@ def _list_github_versions(owner: str, repo: str) -> list[PackageVersion]:
         if chosen is None:
             continue
         _, version = _wheel_name_version(chosen)
+        tag = release.get("tag_name")
         versions.append(
             PackageVersion(
                 version=version,
                 wheel_url=assets[chosen]["browser_download_url"],
                 wheel_filename=chosen,
                 yanked=False,
+                source_url=(
+                    f"https://github.com/{owner}/{repo}/archive/refs/tags/{tag}.tar.gz"
+                    if tag else None
+                ),
             )
         )
     return versions
+
+
+def _github_tag_from_source_url(url: Optional[str]):
+    m = re.match(
+        r"https://github\.com/([^/]+)/([^/]+)/archive/refs/tags/(.+)\.tar\.gz$",
+        url or "",
+    )
+    return m.groups() if m else None
+
+
+def has_pixi_lock(pv: PackageVersion) -> Optional[bool]:
+    """
+    Whether the release ships a pixi.lock. Cheap for GitHub releases (one
+    request to raw.githubusercontent.com, not the API); None (unknown) for
+    PyPI sdists, which have to be downloaded to tell.
+    """
+    if pv.pixi_lock is not None:
+        return pv.pixi_lock
+    gh = _github_tag_from_source_url(pv.source_url)
+    if gh is None:
+        return None
+    owner, repo, tag = gh
+    req = urllib.request.Request(
+        f"https://raw.githubusercontent.com/{owner}/{repo}/{tag}/pixi.lock",
+        method="HEAD",
+        headers={"User-Agent": USER_AGENT},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT):
+            pv.pixi_lock = True
+    except Exception:  # noqa: BLE001
+        pv.pixi_lock = False
+    return pv.pixi_lock
 
 
 def load_package(source: str) -> TaskPackage:
@@ -634,7 +688,10 @@ def packages_from_index(index: dict, base_url: str = "") -> list[TaskPackage]:
         versions, summaries = [], {}
         for v in p["versions"]:
             summary = v.pop("summary", None)
-            versions.append(PackageVersion(**v))
+            known = PackageVersion.__dataclass_fields__
+            versions.append(
+                PackageVersion(**{k: x for k, x in v.items() if k in known})
+            )
             if summary is not None:
                 summaries[v["version"]] = summary
         packages.append(
@@ -791,32 +848,101 @@ def _run_streaming(cmd: list[str], log: Callable[[str], None]) -> str:
     return "\n".join(lines)
 
 
-def install_version(
-    pkg: TaskPackage,
-    version: str,
-    extras: Optional[list[str]] = None,
-    log: Callable[[str], None] = print,
-    pins: Optional[list[str]] = None,
-) -> dict:
-    """
-    Create/update the pixi env for (package, version) and locate the
-    installed package. Returns a dict compatible with
-    ``PackageImporter.loaded_packages`` entries.
-    """
-    info = get_version_info(pkg, version)
-    extras = list(extras or [])
-    pixi = find_pixi()
-    manifest = write_pixi_manifest(
-        pkg, version, extras, info.requires_python, pins=pins
-    )
+# Don't download huge source archives just to look for a pixi.lock
+MAX_SOURCE_DOWNLOAD = 50 * 1024 * 1024
 
-    log(f"Installing {pkg.pkg_name}=={version} into {manifest.parent}")
-    _run_streaming([pixi, "install", "--manifest-path", str(manifest)], log)
 
+def _safe_extract(archive: bytes, dest: Path) -> Path:
+    """Extract a .tar.gz (no paths outside ``dest``, no links); returns the
+    project root (the single top-level folder of sdists / GitHub tarballs)."""
+    import tarfile
+
+    dest.mkdir(parents=True, exist_ok=True)
+    root = dest.resolve()
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        members = []
+        for m in tar.getmembers():
+            target = (root / m.name).resolve()
+            if target != root and not str(target).startswith(str(root) + os.sep):
+                raise ValueError(f"Unsafe path in archive: {m.name}")
+            if m.issym() or m.islnk() or m.isdev():
+                continue
+            members.append(m)
+        if hasattr(tarfile, "data_filter"):  # Python >= 3.12 (and backports)
+            tar.extractall(root, members=members, filter="data")
+        else:
+            tar.extractall(root, members=members)
+    tops = [p for p in root.iterdir() if p.is_dir()]
+    return tops[0] if len(tops) == 1 else root
+
+
+def _pixi_manifest_in(project: Path) -> Optional[Path]:
+    """pixi.toml, or pyproject.toml with a [tool.pixi] table."""
+    if (project / "pixi.toml").exists():
+        return project / "pixi.toml"
+    pyproject = project / "pyproject.toml"
+    if pyproject.exists() and "[tool.pixi" in pyproject.read_text(errors="ignore"):
+        return pyproject
+    return None
+
+
+def _install_from_pixi_lock(
+    pkg: TaskPackage, version: str, pixi: str, log: Callable[[str], None]
+) -> Optional[Path]:
+    """
+    Install from the release's own pixi.lock (``pixi install --frozen``),
+    like fractal-server's pixi task collection. Returns the pixi manifest to
+    run tasks with, or None if the release has no usable lock file.
+    """
+    pv = pkg.get_version(version)
+    if not pv.source_url or has_pixi_lock(pv) is False:
+        return None
+    if pv.source_size and pv.source_size > MAX_SOURCE_DOWNLOAD:
+        log(f"Source archive too large to check for pixi.lock ({pv.source_size >> 20} MB)")
+        return None
+
+    log(f"Looking for pixi.lock in {pv.source_url}")
+    try:
+        archive = _http_get(pv.source_url)
+    except Exception as e:  # noqa: BLE001
+        log(f"Could not download the source archive: {e}")
+        return None
+
+    src_dir = env_dir(pkg.pkg_name, version) / "source"
+    if src_dir.exists():
+        shutil.rmtree(src_dir)
+    project = _safe_extract(archive, src_dir)
+    manifest = _pixi_manifest_in(project)
+    if manifest is None or not (project / "pixi.lock").exists():
+        log("No pixi.lock in this release")
+        shutil.rmtree(src_dir, ignore_errors=True)
+        return None
+
+    platform_ = current_pixi_platform()
+    lock_text = (project / "pixi.lock").read_text(errors="ignore")
+    if not re.search(rf"^\s+{re.escape(platform_)}:\s*$", lock_text, re.M):
+        log(f"The pixi.lock of this release does not cover {platform_}")
+        shutil.rmtree(src_dir, ignore_errors=True)
+        return None
+
+    log(f"Installing {pkg.pkg_name}=={version} from its pixi.lock (exact versions)")
+    try:
+        _run_streaming(
+            [pixi, "install", "--frozen", "--manifest-path", str(manifest)], log
+        )
+    except RuntimeError as e:
+        # e.g. the lock file does not cover this platform
+        log(f"Installing from pixi.lock failed, falling back: {str(e).splitlines()[-1]}")
+        shutil.rmtree(src_dir, ignore_errors=True)
+        return None
+    return manifest
+
+
+def _locate_package(pixi: str, manifest: Path, frozen: bool, module_name: str) -> str:
+    """Folder of the installed task package inside the pixi environment."""
+    run = [pixi, "run"] + (["--frozen"] if frozen else [])
     out = _run_streaming(
-        [
-            pixi,
-            "run",
+        run + [
             "--manifest-path",
             str(manifest),
             "python",
@@ -824,27 +950,84 @@ def install_version(
             "import importlib.util, sys; "
             "s = importlib.util.find_spec(sys.argv[1]); "
             "print('PKGDIR=' + list(s.submodule_search_locations)[0])",
-            info.module_name,
+            module_name,
         ],
         log=lambda _line: None,
     )
-    pkg_dir = next(
-        line[len("PKGDIR="):] for line in out.splitlines()
-        if line.startswith("PKGDIR=")
-    )
-    log(f"Installed {pkg.pkg_name}=={version} at {pkg_dir}")
+    for line in out.splitlines():
+        if line.startswith("PKGDIR="):
+            return line[len("PKGDIR="):]
+    raise RuntimeError(f"Could not find {module_name} in the environment")
 
+
+def _install_resolved(pkg, version, info, extras, pins, pixi, log) -> Path:
+    manifest = write_pixi_manifest(
+        pkg, version, extras, info.requires_python, pins=pins
+    )
+    log(f"Installing {pkg.pkg_name}=={version} into {manifest.parent}")
+    _run_streaming([pixi, "install", "--manifest-path", str(manifest)], log)
+    return manifest
+
+
+def install_version(
+    pkg: TaskPackage,
+    version: str,
+    extras: Optional[list[str]] = None,
+    log: Callable[[str], None] = print,
+    pins: Optional[list[str]] = None,
+    use_lock: bool = True,
+) -> dict:
+    """
+    Create/update the pixi env for (package, version) and locate the
+    installed package. Returns a dict compatible with
+    ``PackageImporter.loaded_packages`` entries.
+
+    With ``use_lock`` (default), the release's own ``pixi.lock`` is used when
+    it ships one: exact, tested dependency versions (extras/pins are then
+    ignored). Otherwise a pixi.toml pinning ``pkg==version`` (+ extras and
+    pins) is solved.
+    """
+    info = get_version_info(pkg, version)
+    extras = list(extras or [])
+    pixi = find_pixi()
+
+    manifest = _install_from_pixi_lock(pkg, version, pixi, log) if use_lock else None
+    frozen = manifest is not None
+    if manifest is None:
+        manifest = _install_resolved(pkg, version, info, extras, pins, pixi, log)
+
+    try:
+        pkg_dir = _locate_package(pixi, manifest, frozen, info.module_name)
+    except RuntimeError as e:
+        if not frozen:
+            raise
+        # The locked environment does not contain the package itself
+        log(f"{e} (pixi.lock environment); building an environment instead")
+        shutil.rmtree(env_dir(pkg.pkg_name, version) / "source", ignore_errors=True)
+        frozen = False
+        manifest = _install_resolved(pkg, version, info, extras, pins, pixi, log)
+        pkg_dir = _locate_package(pixi, manifest, False, info.module_name)
+
+    log(
+        f"Installed {pkg.pkg_name}=={version} at {pkg_dir}"
+        + (" (from the package's pixi.lock)" if frozen else "")
+    )
     return {
         "src_path": pkg_dir,
         "manifest_path": os.path.join(pkg_dir, "__FRACTAL_MANIFEST__.json"),
         "pixi_manifest_path": str(manifest),
+        "pixi_frozen": frozen,
+        "env_kind": "pixi.lock" if frozen else "resolved",
         "version": version,
     }
 
 
 def is_installed(pkg_name: str, version: str) -> bool:
     d = env_dir(pkg_name, version)
-    return (d / "pixi.toml").exists() and (d / ".pixi" / "envs").exists()
+    if (d / "pixi.toml").exists() and (d / ".pixi" / "envs").exists():
+        return True
+    src = d / "source"
+    return src.exists() and any(src.glob("*/.pixi/envs"))
 
 
 def iter_catalog(

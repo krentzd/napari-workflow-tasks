@@ -194,3 +194,129 @@ def test_snapshot_roundtrip(isolated_home, tmp_path, monkeypatch):
     assert catalog.task_type(info.task_list[0]) == "parallel"
     assert info.extras == ["fractal-tasks"]
     assert "args_schema_parallel" not in info.task_list[0]  # summary only
+
+
+# ---------------------------------------------------------------------------
+# Installing from the package's pixi.lock
+# ---------------------------------------------------------------------------
+
+FAKE_PIXI = r"""#!/usr/bin/env python3
+import os, sys, pathlib
+args = sys.argv[1:]
+manifest = pathlib.Path(args[args.index("--manifest-path") + 1])
+with open(os.environ["FAKE_PIXI_LOG"], "a") as f:
+    f.write(" ".join(args) + "\n")
+if args[0] == "install":
+    if "--frozen" in args and os.environ.get("FAKE_PIXI_FAIL_FROZEN"):
+        print("lock file does not contain platform osx-arm64"); sys.exit(1)
+    (manifest.parent / ".pixi" / "envs" / "default").mkdir(parents=True, exist_ok=True)
+elif args[0] == "run":
+    print("PKGDIR=" + str(manifest.parent / "site-packages" / args[-1]))
+"""
+
+
+def _tarball(files: dict) -> bytes:
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, text in files.items():
+            data = text.encode()
+            info = tarfile.TarInfo(f"my_tasks-1.2.0/{name}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+@pytest.fixture
+def fake_pixi(isolated_home, tmp_path, monkeypatch):
+    exe = tmp_path / "pixi"
+    exe.write_text(FAKE_PIXI)
+    exe.chmod(0o755)
+    log = tmp_path / "pixi.log"
+    monkeypatch.setenv("FAKE_PIXI_LOG", str(log))
+    monkeypatch.setattr(catalog, "find_pixi", lambda: str(exe))
+    info = catalog.VersionInfo(
+        {"task_list": []}, "my_tasks", "my_tasks/__FRACTAL_MANIFEST__.json", [], ">=3.11"
+    )
+    monkeypatch.setattr(catalog, "get_version_info", lambda pkg, v: info)
+    return log
+
+
+def _pkg_with_source(archive):
+    pkg = _pkg()
+    pv = pkg.get_version("1.2.0")
+    pv.source_url = "https://files.example/my_tasks-1.2.0.tar.gz"
+    return pkg
+
+
+def test_install_uses_pixi_lock(fake_pixi, monkeypatch):
+    archive = _tarball({
+        "pyproject.toml": "[project]\nname='my-tasks'\n[tool.pixi.workspace]\n",
+        "pixi.lock": "version: 6\nenvironments:\n  default:\n    packages:\n      " + catalog.current_pixi_platform() + ":\n      - pypi: x\n",
+    })
+    monkeypatch.setattr(catalog, "_http_get", lambda url, headers=None: archive)
+    entry = catalog.install_version(_pkg_with_source(archive), "1.2.0", log=lambda _l: None)
+
+    assert entry["pixi_frozen"] is True
+    assert entry["pixi_manifest_path"].endswith("source/my_tasks-1.2.0/pyproject.toml")
+    calls = fake_pixi.read_text().splitlines()
+    assert calls[0].startswith("install --frozen --manifest-path")
+    assert calls[1].startswith("run --frozen --manifest-path")
+    assert catalog.is_installed("my-tasks", "1.2.0")
+
+
+def test_install_without_lock_falls_back(fake_pixi, monkeypatch):
+    archive = _tarball({"pyproject.toml": "[project]\nname='my-tasks'\n"})
+    monkeypatch.setattr(catalog, "_http_get", lambda url, headers=None: archive)
+    entry = catalog.install_version(_pkg_with_source(archive), "1.2.0", log=lambda _l: None)
+
+    assert entry["pixi_frozen"] is False
+    assert entry["pixi_manifest_path"].endswith("my-tasks/1.2.0/pixi.toml")
+    assert not (catalog.env_dir("my-tasks", "1.2.0") / "source").exists()
+
+
+def test_failed_lock_install_falls_back(fake_pixi, monkeypatch):
+    archive = _tarball({"pixi.toml": "[workspace]\n", "pixi.lock": "version: 6\nenvironments:\n  default:\n    packages:\n      " + catalog.current_pixi_platform() + ":\n"})
+    monkeypatch.setattr(catalog, "_http_get", lambda url, headers=None: archive)
+    monkeypatch.setenv("FAKE_PIXI_FAIL_FROZEN", "1")
+    entry = catalog.install_version(_pkg_with_source(archive), "1.2.0", log=lambda _l: None)
+
+    assert entry["pixi_frozen"] is False
+    assert not (catalog.env_dir("my-tasks", "1.2.0") / "source").exists()
+
+
+def test_use_lock_false_skips_download(fake_pixi, monkeypatch):
+    def no_download(url, headers=None):
+        raise AssertionError("should not download the source archive")
+
+    monkeypatch.setattr(catalog, "_http_get", no_download)
+    entry = catalog.install_version(
+        _pkg_with_source(b""), "1.2.0", log=lambda _l: None, use_lock=False
+    )
+    assert entry["pixi_frozen"] is False
+
+
+def test_safe_extract_rejects_path_traversal(tmp_path):
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo("../evil.txt")
+        info.size = 1
+        tar.addfile(info, io.BytesIO(b"x"))
+    with pytest.raises(ValueError, match="Unsafe"):
+        catalog._safe_extract(buf.getvalue(), tmp_path / "out")
+
+
+def test_lock_for_other_platform_falls_back(fake_pixi, monkeypatch):
+    archive = _tarball({
+        "pixi.toml": "[workspace]\n",
+        "pixi.lock": "version: 6\nenvironments:\n  default:\n    packages:\n      some-other-os:\n",
+    })
+    monkeypatch.setattr(catalog, "_http_get", lambda url, headers=None: archive)
+    entry = catalog.install_version(_pkg_with_source(archive), "1.2.0", log=lambda _l: None)
+    assert entry["pixi_frozen"] is False
+    assert "--frozen" not in fake_pixi.read_text()

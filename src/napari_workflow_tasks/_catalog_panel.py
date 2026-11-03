@@ -124,6 +124,18 @@ class CatalogPanel(QGroupBox):
         pins_row.layout().addWidget(self.pins_edit)
         layout.addWidget(pins_row)
 
+        self.lock_check = QCheckBox("Use the package's pixi.lock when available")
+        self.lock_check.setChecked(True)
+        self.lock_check.setToolTip(
+            "Install the exact dependency versions the task authors locked and "
+            "tested (like fractal-server's pixi task collection). "
+            "pip extras and pinned packages are then ignored. Falls back to "
+            "resolving dependencies if the release has no pixi.lock or it "
+            "does not cover this platform."
+        )
+        self.lock_check.toggled.connect(self._update_lock_hint)
+        layout.addWidget(self.lock_check)
+
         # Install
         self.install_btn = QPushButton("Install && add task")
         self.install_btn.setEnabled(False)
@@ -225,6 +237,8 @@ class CatalogPanel(QGroupBox):
         combo = QComboBox()
         for v in pkg.versions:
             label = v.version
+            if v.pixi_lock:
+                label += "  🔒"
             if catalog.is_installed(pkg.pkg_name, v.version):
                 label += "  ✓"
             if v.yanked:
@@ -232,7 +246,10 @@ class CatalogPanel(QGroupBox):
             elif v.is_prerelease:
                 label += "  (pre-release)"
             combo.addItem(label, v.version)
-        combo.setToolTip("Choose the package version (newest first). ✓ = installed")
+        combo.setToolTip(
+            "Choose the package version (newest first).\n"
+            "🔒 = ships a pixi.lock (exact, tested dependencies)\n✓ = installed"
+        )
         combo.setCurrentIndex(pkg.versions.index(pkg.default_version))
         combo.currentIndexChanged.connect(
             lambda _i, name=pkg.pkg_name: self._on_version_changed(name)
@@ -362,9 +379,28 @@ class CatalogPanel(QGroupBox):
         self.pins_edit.setText(
             ", ".join(catalog.SUGGESTED_PINS.get(pkg_name, []))
         )
+        self._update_lock_hint()
         if info:
             self.extras_edit.setToolTip(
                 "Available extras: " + (", ".join(info.extras) or "none")
+            )
+
+    def _update_lock_hint(self, *_):
+        """Grey out extras/pins when they won't be used (locked release)."""
+        sel = self._selected()
+        locked = False
+        if sel is not None and sel[1] in self._packages:
+            pkg = self._packages[sel[1]]
+            try:
+                locked = bool(pkg.get_version(self.selected_version(sel[1])).pixi_lock)
+            except KeyError:
+                locked = False
+        use = locked and self.lock_check.isChecked()
+        for w in (self.extras_edit, self.pins_edit):
+            w.setEnabled(not use)
+            w.setToolTip(
+                "Not used: this release is installed from its pixi.lock"
+                if use else ""
             )
 
     # ------------------------------------------------------------------
@@ -384,6 +420,7 @@ class CatalogPanel(QGroupBox):
         pins = [
             p.strip() for p in self.pins_edit.text().split(",") if p.strip()
         ]
+        use_lock = self.lock_check.isChecked()
 
         self.install_btn.setEnabled(False)
         self.refresh_btn.setEnabled(False)
@@ -396,7 +433,8 @@ class CatalogPanel(QGroupBox):
 
         def _install():
             entry = catalog.install_version(
-                pkg, version, extras=extras, log=emitter.line.emit, pins=pins
+                pkg, version, extras=extras, log=emitter.line.emit, pins=pins,
+                use_lock=use_lock,
             )
             return catalog.get_version_info(pkg, version), entry
 
@@ -423,8 +461,9 @@ class CatalogPanel(QGroupBox):
             idx = combo.findData(version)
             if idx >= 0 and "✓" not in combo.itemText(idx):
                 combo.setItemText(idx, combo.itemText(idx) + "  ✓")
-        self.status.setText(f"Installed {pkg.pkg_name}=={version}.")
-        show_info(f"Installed {pkg.pkg_name}=={version}")
+        how = " from its pixi.lock" if entry.get("pixi_frozen") else ""
+        self.status.setText(f"Installed {pkg.pkg_name}=={version}{how}.")
+        show_info(f"Installed {pkg.pkg_name}=={version}{how}")
         self.installed.emit(pkg, version, info, entry, task_name)
 
     # ------------------------------------------------------------------

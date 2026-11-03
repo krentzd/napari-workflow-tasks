@@ -847,8 +847,10 @@ class TasksQWidget(QWidget):
         except FileNotFoundError as e:
             show_error(str(e))
             return
+        entry = self.package_importer.loaded_packages[package_name]
+        frozen = ['--frozen'] if entry.get('pixi_frozen') else []
         cmd = [
-            pixi, 'run', '--manifest-path', manifest_path,
+            pixi, 'run', *frozen, '--manifest-path', manifest_path,
             'python', self.task_manager.get_executable_path(task_name),
             '--args-json', path_to_task_args, '--out-json', out_json,
         ]

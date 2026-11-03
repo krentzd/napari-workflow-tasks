@@ -61,6 +61,11 @@ def _version_entry(pkg, pv, out: Path, errors: list) -> dict | None:
             return None
         manifest_file.parent.mkdir(parents=True, exist_ok=True)
         manifest_file.write_text(json.dumps(asdict(info)))
+    lock_cache = out / "manifests" / pkg.pkg_name / f"{pv.version}.pixi_lock"
+    if lock_cache.exists():
+        pv.pixi_lock = lock_cache.read_text().strip() == "1"
+    elif catalog.has_pixi_lock(pv) is not None:
+        lock_cache.write_text("1" if pv.pixi_lock else "0")
     entry = asdict(pv)
     entry["summary"] = catalog.summarize_info(info)
     return entry
