@@ -239,6 +239,34 @@ def task_type(task: dict) -> str:
     return "unknown"
 
 
+def task_kind(task: dict) -> str:
+    """parallel | non_parallel | compound | converter_non_parallel |
+    converter_compound (as in fractal-server's TaskType)."""
+    p = task.get("executable_parallel")
+    np_ = task.get("executable_non_parallel")
+    if not p and not np_:
+        return "unknown"
+    # Recent manifests (fractal-task-tools) state the type explicitly
+    if task.get("type") in (
+        "parallel", "non_parallel", "compound",
+        "converter_non_parallel", "converter_compound",
+    ):
+        return task["type"]
+    if p and not np_:
+        return "parallel"
+    # Older manifests: converters don't take input images, or are in the
+    # "Conversion" category (fractal-tasks-core 1.x converters still had an
+    # unused `zarr_urls` argument)
+    schema = task.get("args_schema_non_parallel") or {}
+    converter = (
+        "zarr_urls" not in (schema.get("properties") or {})
+        or task.get("category") == "Conversion"
+    )
+    if p and np_:
+        return "converter_compound" if converter else "compound"
+    return "converter_non_parallel" if converter else "non_parallel"
+
+
 def _http_get(url: str, headers: Optional[dict] = None) -> bytes:
     req_headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"}
     req_headers.update(headers or {})
@@ -695,6 +723,9 @@ def summarize_info(info: VersionInfo) -> dict:
         docs = task.get("docs_info") or ""
         if docs:
             summary["docs_info"] = docs[:400]
+        # parallel / non_parallel / compound / converter_* (needs the schema,
+        # which the summary does not keep)
+        summary["kind"] = task_kind(task)
         tasks.append(summary)
     return {
         "module_name": info.module_name,

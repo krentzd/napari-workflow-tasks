@@ -5,15 +5,16 @@ from qtpy.QtWidgets import (QHBoxLayout, QPushButton, QWidget, QTabWidget,
                             QVBoxLayout, QLabel,
                             QLineEdit, QFileDialog, QCheckBox, QComboBox,
                             QGroupBox, QScrollArea, QPlainTextEdit,
-                            QProgressBar)
+                            QProgressBar, QListWidget, QListWidgetItem)
 from qtpy.QtGui import QPixmap, QFont
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, Signal
 
 from PyQt5.QtCore import QObject, QThread, pyqtSignal, pyqtSlot
 from PyQt5.QtWidgets import QLineEdit, QCheckBox, QMessageBox
 
 import ast
 import json
+import re
 import subprocess
 import os
 import time
@@ -39,7 +40,9 @@ from .io_utils import PackageImporter
 
 from .pixi_utils import pixi_runner
 from ._catalog_panel import CatalogPanel
-from .catalog import find_pixi, task_type
+from .catalog import find_pixi, task_kind
+from ._runner import (RUNNABLE_KINDS, TaskJob, default_zarr_dir, image_urls,
+                      layer_image_urls, run_task_job, short_name)
 from ._schema_form import ListField, SchemaError, SchemaForm, _Collapsible
 
 if TYPE_CHECKING:
@@ -205,6 +208,96 @@ def _stream_process(cmd):
     return proc.wait()
 
 
+def _with_defs(schema):
+    """A task's args schema as a standalone object schema."""
+    schema = dict(schema or {})
+    schema.setdefault("type", "object")
+    schema.setdefault("properties", {})
+    return schema
+
+
+def _run_dir(task_name):
+    """Fresh folder for a run's argument/output JSON files."""
+    slug = re.sub(r"[^A-Za-z0-9_.=-]+", "_", task_name).strip("_")[:80]
+    path = Path.home() / ".napari_workflow_tasks" / "runs" / slug / time.strftime("%Y%m%d-%H%M%S")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+class _InputImages(QWidget):
+    """Check list of the OME-Zarr images loaded in the viewer."""
+
+    changed = Signal()
+
+    def __init__(self, get_images, default=None, parent=None):
+        super().__init__(parent)
+        self._get_images = get_images
+        self._default = default  # url -> bool; None = check all
+        self._state = {}         # remembered check states per url
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.list = QListWidget()
+        self.list.setMaximumHeight(130)
+        self.list.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self.list)
+        buttons = QHBoxLayout()
+        for text, value in (("All", True), ("None", False)):
+            b = QPushButton(text)
+            b.setMaximumWidth(60)
+            b.clicked.connect(lambda _=False, v=value: self._check_all(v))
+            buttons.addWidget(b)
+        self.count = QLabel()
+        self.count.setStyleSheet("color: gray;")
+        buttons.addWidget(self.count, 1)
+        layout.addLayout(buttons)
+        self.refresh()
+
+    def refresh(self, *_):
+        images = self._get_images()
+        self.list.blockSignals(True)
+        self.list.clear()
+        for url, layers in images.items():
+            if url not in self._state:
+                self._state[url] = self._default(url) if self._default else True
+            item = QListWidgetItem(short_name(url))
+            item.setData(Qt.UserRole, url)
+            item.setToolTip(f"{url}\nLayers: {', '.join(layers)}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if self._state[url] else Qt.Unchecked)
+            self.list.addItem(item)
+        if not images:
+            item = QListWidgetItem("(open an OME-Zarr image in napari)")
+            item.setFlags(Qt.NoItemFlags)
+            self.list.addItem(item)
+        self.list.blockSignals(False)
+        self._update_count()
+
+    def _on_item_changed(self, item):
+        url = item.data(Qt.UserRole)
+        if url:
+            self._state[url] = item.checkState() == Qt.Checked
+        self._update_count()
+
+    def _check_all(self, value):
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item.data(Qt.UserRole):
+                item.setCheckState(Qt.Checked if value else Qt.Unchecked)
+
+    def _update_count(self):
+        n = len(self.selected())
+        self.count.setText(f"{n} image{'s' if n != 1 else ''} selected")
+        self.changed.emit()
+
+    def selected(self):
+        return [
+            self.list.item(i).data(Qt.UserRole)
+            for i in range(self.list.count())
+            if self.list.item(i).data(Qt.UserRole)
+            and self.list.item(i).checkState() == Qt.Checked
+        ]
+
+
 def wipe_cache():
     from napari.utils import resize_dask_cache
     cache = resize_dask_cache()
@@ -253,6 +346,10 @@ class FractalTaskManager:
         version=None,
         docs_info=None,
         docs_link=None,
+        kind='parallel',
+        executable_non_parallel=None,
+        schema_parallel=None,
+        schema_non_parallel=None,
     ):
         # `name` is the unique key (e.g. "Cellpose Segmentation
         # [fractal-tasks-core==1.4.0]"); `base_name` is the manifest name.
@@ -263,6 +360,11 @@ class FractalTaskManager:
             version=version,
             docs_info=docs_info,
             docs_link=docs_link,
+            # parallel | non_parallel | compound (see _runner)
+            kind=kind,
+            executable_non_parallel=executable_non_parallel,
+            schema_parallel=schema_parallel,
+            schema_non_parallel=schema_non_parallel,
             package_name=package_name,
             parent_dir=parent_dir,
             executable_parallel=executable_parallel,
@@ -276,11 +378,13 @@ class FractalTaskManager:
 
     def get_executable_path(
         self,
-        name
+        name,
+        which='parallel',
     ):
         parent_dir = self.tasks[name]['parent_dir']
-        exec_fname = self.tasks[name]['executable_parallel']
-
+        exec_fname = self.tasks[name][f'executable_{which}']
+        if not exec_fname:
+            return None
         return os.path.join(parent_dir, exec_fname)
 
     def get_package_name(
@@ -663,79 +767,94 @@ class TasksQWidget(QWidget):
             manifest = info.manifest
 
         selected_key = None
+        skipped = []
         for task in manifest["task_list"]:
-            if task_type(task) != "parallel":
+            kind = task_kind(task)
+            if kind not in RUNNABLE_KINDS:
+                skipped.append(task["name"])
                 continue
             key = f"{task['name']} [{package_key}]"
             if key not in self.task_manager.tasks:
-                schema = task["args_schema_parallel"]
+                schema_p = task.get("args_schema_parallel")
+                schema_np = task.get("args_schema_non_parallel")
+                # The form shown first: the per-image arguments, except for
+                # non-parallel tasks
+                schema = schema_np if kind == "non_parallel" else schema_p
                 self.task_manager.add_task(
                     name=key,
                     base_name=task["name"],
                     version=version,
                     package_name=package_key,
                     parent_dir=entry["src_path"],
-                    executable_parallel=task["executable_parallel"],
-                    properties=schema["properties"],
+                    executable_parallel=task.get("executable_parallel"),
+                    executable_non_parallel=task.get("executable_non_parallel"),
+                    properties=schema.get("properties", {}),
                     defs=schema.get("$defs", None),
                     required=schema.get("required", []),
                     type=schema.get("type"),
                     title=schema.get("title", task["name"]),
                     docs_info=task.get("docs_info"),
                     docs_link=task.get("docs_link"),
+                    kind=kind,
+                    schema_parallel=schema_p,
+                    schema_non_parallel=schema_np,
                 )
                 self.workflow_combo_box.addItem(key)
             if task["name"] == selected_task:
                 selected_key = key
+        if skipped:
+            logger.info(
+                f"{package_key}: not runnable on viewer images (converters): "
+                + ", ".join(skipped)
+            )
 
         if selected_key is not None:
             self.workflow_combo_box.setCurrentText(selected_key)
             self._add_task()
 
-    def _fetch_subprocess_output(self, task_name):
-        """Show what a task produced: new/updated labels and new images."""
+    # At most this many new images are opened after a run
+    MAX_IMAGES_TO_OPEN = 8
+
+    def _fetch_subprocess_output(self, task_name, result=None):
+        """Show what a task produced: new/updated labels in the input images
+        and new images reported in ``image_list_updates``."""
         logger.info(f'Received task_name={task_name}')
         wipe_cache()
-        props = self.task_manager.get_properties(task_name)
-        path_to_zarr = props['zarr_url']['value']
-
-        # 1. Labels written into the input image: new ones, plus the
-        #    task's output-label argument (covers overwriting an existing one)
-        labels_after = set(_list_labels(path_to_zarr))
-        label_names = labels_after - getattr(self, '_labels_before', set())
+        before = getattr(self, '_labels_before', {})
+        inputs = list(before)
+        if result is not None:
+            inputs = list(dict.fromkeys(inputs + result.processed_zarr_urls))
+        many = len(inputs) > 1
         out_label = self._output_label_name(task_name)
-        if out_label in labels_after:
-            label_names.add(out_label)
-
-        # 2. New images reported by the task (e.g. "0_gaussian_blur"), from
-        #    the "image_list_updates" in the task's --out-json file
-        out_json = os.path.join(
-            os.path.dirname(self.task_manager.get_path_to_json(task_name)),
-            "out_file.json",
-        )
-        new_zarr_urls = []
-        if os.path.exists(out_json):
-            try:
-                with open(out_json) as f:
-                    metadata = json.load(f) or {}
-            except (OSError, ValueError):
-                metadata = {}
-            for update in metadata.get('image_list_updates', []):
-                url = update.get('zarr_url')
-                if url and os.path.normpath(url) != os.path.normpath(path_to_zarr):
-                    new_zarr_urls.append(url)
 
         shown = []
-        if label_names:
-            shown += self._load_zarr_layers(path_to_zarr, labels=label_names)
-        for url in new_zarr_urls:
-            shown += self._load_zarr_layers(url, suffix=os.path.basename(url))
+        # 1. Labels written into the input images: new ones, plus the task's
+        #    output-label argument (covers overwriting an existing one)
+        for url in inputs:
+            labels_after = set(_list_labels(url))
+            label_names = labels_after - before.get(url, set())
+            if out_label in labels_after:
+                label_names.add(out_label)
+            if label_names:
+                shown += self._load_zarr_layers(
+                    url, labels=label_names, suffix=short_name(url) if many else None
+                )
 
-        if shown:
-            show_info(f"{task_name}: added {', '.join(shown)}")
-        else:
-            show_info(f"{task_name} finished (nothing new to display).")
+        # 2. New images (e.g. "0_gaussian_blur", "..._mip.zarr/B/03/0")
+        input_set = {os.path.normpath(u) for u in inputs}
+        new_urls = []
+        for update in (result.image_list_updates if result else []):
+            url = update.get('zarr_url')
+            if url and os.path.normpath(url) not in input_set and url not in new_urls:
+                new_urls.append(url)
+        for url in new_urls[: self.MAX_IMAGES_TO_OPEN]:
+            shown += self._load_zarr_layers(url, suffix=short_name(url))
 
+        msg = f"added {', '.join(shown[:6])}" + ("…" if len(shown) > 6 else "") if shown \
+            else "finished (nothing new to display)"
+        if len(new_urls) > self.MAX_IMAGES_TO_OPEN:
+            msg += f"; {len(new_urls) - self.MAX_IMAGES_TO_OPEN} more new images not opened"
+        show_info(f"{self.task_manager.get_task(task_name)['base_name']}: {msg}")
         self._update_execute_buttons(is_enabled=True)
 
     def _output_label_name(self, task_name):
@@ -819,79 +938,103 @@ class TasksQWidget(QWidget):
 
     def _execute_task(self, task_name):
         ui = self._task_ui[task_name]
-        path_to_zarr = self._selected_zarr_url()
-        if not path_to_zarr:
-            show_error("Select an OME-Zarr image layer as input (Main tab).")
+        task = self.task_manager.get_task(task_name)
+        kind = task.get('kind', 'parallel')
+
+        zarr_urls = ui['inputs'].selected()
+        if not zarr_urls:
+            show_error("Select at least one input image (OME-Zarr loaded in the viewer).")
+            return
+        zarr_dir = ui['zarr_dir'].text().strip() if ui.get('zarr_dir') else ''
+        if kind != 'parallel' and not zarr_dir:
+            show_error("Set the output folder (zarr_dir).")
             return
 
         try:
-            args = ui['form'].get_args()
+            args_p = ui['form'].get_args() if ui.get('form') else {}
+            args_np = ui['form_np'].get_args() if ui.get('form_np') else {}
         except SchemaError as e:
             ui['status'].setText(f"⚠ {e}")
-            show_error(f"{self.task_manager.get_task(task_name)['base_name']}: {e}")
+            show_error(f"{task['base_name']}: {e}")
             return
-        args['zarr_url'] = path_to_zarr
 
         # Keep the values: used to find the outputs after the run
+        values = args_np if kind == 'non_parallel' else args_p
         for key, prop in self.task_manager.get_properties(task_name).items():
-            prop['value'] = args.get(key, MISSING)
-
-        path_to_task_args = self.task_manager.get_path_to_json(task_name)
-        with open(path_to_task_args, 'w') as f:
-            json.dump(args, f, indent=1)
-        out_json = os.path.join(os.path.dirname(path_to_task_args), "out_file.json")
-        if os.path.exists(out_json):
-            os.remove(out_json)
+            prop['value'] = values.get(key, MISSING)
 
         # Remember existing labels so new ones can be shown after the run
-        self._labels_before = set(_list_labels(path_to_zarr))
+        self._labels_before = {u: set(_list_labels(u)) for u in zarr_urls}
 
         package_name = self.task_manager.get_package_name(task_name)
-        manifest_path = self.package_importer.loaded_packages[package_name]['pixi_manifest_path']
+        entry = self.package_importer.loaded_packages[package_name]
         try:
             pixi = find_pixi()
         except FileNotFoundError as e:
             show_error(str(e))
             return
-        entry = self.package_importer.loaded_packages[package_name]
         frozen = ['--frozen'] if entry.get('pixi_frozen') else []
-        cmd = [
-            pixi, 'run', *frozen, '--manifest-path', manifest_path,
-            'python', self.task_manager.get_executable_path(task_name),
-            '--args-json', path_to_task_args, '--out-json', out_json,
-        ]
+        job = TaskJob(
+            kind=kind,
+            run_prefix=[pixi, 'run', *frozen, '--manifest-path',
+                        entry['pixi_manifest_path'], 'python'],
+            executable_parallel=self.task_manager.get_executable_path(task_name, 'parallel'),
+            executable_non_parallel=self.task_manager.get_executable_path(task_name, 'non_parallel'),
+            zarr_urls=zarr_urls,
+            zarr_dir=zarr_dir,
+            args_parallel=args_p,
+            args_non_parallel=args_np,
+            workdir=_run_dir(task_name),
+            stop_on_error=not ui['continue_check'].isChecked(),
+        )
 
         self._update_execute_buttons(is_enabled=False)
         ui['log'].clear()
-        ui['log'].appendPlainText(f"$ {' '.join(cmd)}\n")
         ui['progress'].setVisible(True)
-        ui['status'].setText(f"Running on {os.path.basename(path_to_zarr)}…")
+        what = short_name(zarr_urls[0]) if len(zarr_urls) == 1 else f"{len(zarr_urls)} images"
+        ui['status'].setText(f"Running on {what}…")
         ui['t0'] = time.monotonic()
 
-        worker = create_worker(_stream_process, cmd)
-        worker.yielded.connect(ui['log'].appendPlainText)
-        worker.returned.connect(lambda rc: self._on_task_finished(task_name, rc))
-        worker.errored.connect(lambda e: self._on_task_finished(task_name, -1, e))
+        # Errors are handled in _on_task_finished; without _ignore_errors
+        # napari re-raises them in the main thread (which aborts with PyQt5)
+        worker = create_worker(run_task_job, job, _ignore_errors=True)
+        worker.yielded.connect(lambda line: self._on_task_log(task_name, line))
+        worker.returned.connect(lambda res: self._on_task_finished(task_name, res))
+        worker.errored.connect(lambda e: self._on_task_finished(task_name, None, e))
         self._task_workers.append(worker)
         worker.finished.connect(lambda w=worker: self._task_workers.remove(w))
         worker.start()
 
-    def _on_task_finished(self, task_name, returncode, error=None):
+    def _on_task_log(self, task_name, line):
+        ui = self._task_ui.get(task_name)
+        if ui is None:
+            return
+        ui['log'].appendPlainText(line)
+        if line.startswith("=== "):  # step headers -> status line
+            ui['status'].setText("Running " + line[4:].strip() + "…")
+
+    def _on_task_finished(self, task_name, result, error=None):
         ui = self._task_ui.get(task_name)
         self._update_execute_buttons(is_enabled=True)
         if ui is None:  # tab closed while running
             return
         ui['progress'].setVisible(False)
         elapsed = time.monotonic() - ui.get('t0', time.monotonic())
-        if returncode == 0:
-            ui['status'].setText(f"✓ Finished in {elapsed:.0f} s")
-            self._fetch_subprocess_output(task_name)
+        name = self.task_manager.get_task(task_name)['base_name']
+        if error is None and result is not None:
+            failed = f", {len(result.failed)} failed" if result.failed else ""
+            n = len(result.processed_zarr_urls)
+            ui['status'].setText(
+                f"✓ Finished in {elapsed:.0f} s ({n} image{'s' if n != 1 else ''}{failed})"
+            )
+            if result.failed:
+                ui['log_section'].button.setChecked(True)
+            self._fetch_subprocess_output(task_name, result)
         else:
-            lines = ui['log'].toPlainText().strip().splitlines()
-            last = str(error) if error else (lines[-1] if lines else "")
+            last = str(error) if error else ""
             ui['status'].setText(f"✗ Failed after {elapsed:.0f} s: {last[:200]}")
             ui['log_section'].button.setChecked(True)
-            show_error(f"{self.task_manager.get_task(task_name)['base_name']} failed: {last[:300]}")
+            show_error(f"{name} failed: {last[:300]}")
 
     # ------------------------------------------------------------------
     # Task tabs
@@ -909,14 +1052,24 @@ class TasksQWidget(QWidget):
         else:
             self._add_task_tab(task_name)
 
-    def _channel_suggestions(self):
-        """Channel labels of the selected input image (for completers)."""
-        url = self._selected_zarr_url()
-        labels = _channel_labels(url) if url else []
+    def _channel_suggestions(self, urls=None):
+        """Channel labels of the input images (for completers)."""
+        urls = urls or [u for u in [self._selected_zarr_url()] if u]
+        labels = []
+        for url in urls:
+            labels += [c for c in _channel_labels(url) if c not in labels]
         current = self._image_layers.currentText()
         if current and current not in labels:
             labels.append(current)
         return labels
+
+    def _viewer_images(self):
+        """OME-Zarr images behind the viewer's layers: {zarr_url: [layer names]}."""
+        images = {}
+        for layer in self._viewer.layers:
+            for url in layer_image_urls(layer):
+                images.setdefault(url, []).append(layer.name)
+        return images
 
     def _add_task_tab(self, task_name):
         task = self.task_manager.get_task(task_name)
@@ -944,7 +1097,10 @@ class TasksQWidget(QWidget):
             paragraphs = [p.strip() for p in docs.split('\n\n')]
             lines = [ln for ln in '\n'.join(paragraphs).splitlines()
                      if ln.strip() and not ln.lstrip().startswith('#')]
-            first = ' '.join(lines[:3]).strip()
+            first = ' '.join(
+                re.sub(r'^\s*[-*]\s+', '', ln) for ln in lines[:3]
+            ).strip()
+            first = re.sub(r'(\*\*|__|`)', '', first)
             docs_label = QLabel(first[:300] + ('…' if len(first) > 300 else ''))
             docs_label.setWordWrap(True)
             docs_label.setToolTip(docs[:3000])
@@ -954,25 +1110,85 @@ class TasksQWidget(QWidget):
             link.setOpenExternalLinks(True)
             outer.addWidget(link)
 
-        input_label = QLabel()
-        input_label.setStyleSheet("color: gray;")
+        kind = task.get('kind', 'parallel')
+        kind_hint = {
+            'parallel': "Runs once per selected image.",
+            'non_parallel': "Runs once on all selected images together.",
+            'compound': "A setup step runs once on all selected images, then "
+                        "the compute step runs once per image it returns.",
+        }[kind]
+        hint = QLabel(kind_hint)
+        hint.setStyleSheet("color: gray;")
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
 
-        def _update_input(*_):
-            name = self._image_layers.currentText()
-            input_label.setText(f"Input: {name}" if name else "Input: (select an image in the Main tab)")
-        _update_input()
-        self._image_layers.currentTextChanged.connect(_update_input)
-        outer.addWidget(input_label)
+        # Input images: OME-Zarrs loaded in the viewer
+        selected_url = self._selected_zarr_url()
+        selected_urls = image_urls(selected_url) if selected_url else []
+        inputs = _InputImages(
+            self._viewer_images,
+            # parallel: the image picked in the Main tab; others: all loaded
+            default=(lambda url: url in selected_urls) if kind == 'parallel' else None,
+        )
+        self._viewer.layers.events.inserted.connect(inputs.refresh)
+        self._viewer.layers.events.removed.connect(inputs.refresh)
+        outer.addWidget(_Collapsible("Input images", inputs, expanded=True))
+
+        zarr_dir_edit = None
+        if kind != 'parallel':
+            zarr_dir_edit = QLineEdit()
+            zarr_dir_edit.setToolTip(
+                "Fractal's zarr_dir: folder containing the plates/images; "
+                "new OME-Zarrs are written here."
+            )
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(QLabel("Output folder (zarr_dir):"))
+            row_layout.addWidget(zarr_dir_edit, 1)
+            outer.addWidget(row)
+            edited = {'by_user': False}
+            zarr_dir_edit.textEdited.connect(lambda *_: edited.update(by_user=True))
+
+            def _update_zarr_dir(*_):
+                if not edited['by_user']:
+                    zarr_dir_edit.setText(default_zarr_dir(inputs.selected()))
+            inputs.changed.connect(_update_zarr_dir)
+            _update_zarr_dir()
 
         # Parameters
-        channels = self._channel_suggestions()
+        channels = self._channel_suggestions(inputs.selected() or None)
         suggestions = {k: channels for k in CHANNEL_FIELDS}
-        form = SchemaForm(schema, suggestions=suggestions)
-        _prefill_channel(form.fields, self._image_layers.currentText(), channels)
+        current_layer = self._image_layers.currentText()
+
+        def _make_form(s):
+            f = SchemaForm(_with_defs(s), suggestions=suggestions)
+            _prefill_channel(f.fields, current_layer, channels)
+            return f
+
+        form = form_np = None
+        params = QWidget()
+        params_layout = QVBoxLayout(params)
+        params_layout.setContentsMargins(0, 0, 0, 0)
+        if kind == 'compound':
+            form_np = _make_form(task['schema_non_parallel'])
+            form = _make_form(task['schema_parallel'])
+            params_layout.addWidget(_Collapsible(
+                "Setup (runs once on all images)", form_np,
+                expanded=bool(form_np.fields)))
+            params_layout.addWidget(_Collapsible(
+                "Compute (runs per image)", form, expanded=True))
+        elif kind == 'non_parallel':
+            form_np = _make_form(schema)
+            params_layout.addWidget(form_np)
+        else:
+            form = _make_form(schema)
+            params_layout.addWidget(form)
+        params_layout.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setWidget(form)
+        scroll.setWidget(params)
         outer.addWidget(scroll, 1)
 
         # Buttons
@@ -985,7 +1201,8 @@ class TasksQWidget(QWidget):
         run_btn.clicked.connect(lambda: self._execute_task(task_name))
         reset_btn = QPushButton("Reset")
         reset_btn.setToolTip("Reset all parameters to the task defaults")
-        reset_btn.clicked.connect(form.reset)
+        reset_btn.clicked.connect(
+            lambda: [f.reset() for f in (form, form_np) if f is not None])
         close_btn = QPushButton("Remove task")
         close_btn.clicked.connect(lambda: self._close_tab(task_name))
         buttons_layout.addWidget(run_btn, 2)
@@ -999,6 +1216,10 @@ class TasksQWidget(QWidget):
         progress.setMaximumHeight(6)
         progress.setVisible(False)
         outer.addWidget(progress)
+
+        continue_check = QCheckBox("Continue with the other images if one fails")
+        continue_check.setVisible(kind != 'non_parallel')
+        outer.addWidget(continue_check)
 
         status = QLabel("")
         status.setWordWrap(True)
@@ -1014,10 +1235,11 @@ class TasksQWidget(QWidget):
 
         self.exec_btn_dict[task_name] = run_btn
         self._task_ui[task_name] = dict(
-            page=page, form=form, run_btn=run_btn, progress=progress,
-            status=status, log=log, log_section=log_section,
+            page=page, form=form, form_np=form_np, run_btn=run_btn,
+            progress=progress, status=status, log=log, log_section=log_section,
+            inputs=inputs, zarr_dir=zarr_dir_edit, continue_check=continue_check,
         )
-        self.task_manager.add_widget_dict(task_name, form.fields)
+        self.task_manager.add_widget_dict(task_name, (form or form_np).fields)
 
         short = task['base_name'] if len(task['base_name']) <= 22 else task['base_name'][:21] + '…'
         idx = self.tab_container.addTab(page, short)
@@ -1026,6 +1248,13 @@ class TasksQWidget(QWidget):
 
     def _close_tab(self, task_name):
         ui = self._task_ui.pop(task_name, None)
+        if ui is not None:
+            for event in (self._viewer.layers.events.inserted,
+                          self._viewer.layers.events.removed):
+                try:
+                    event.disconnect(ui['inputs'].refresh)
+                except (TypeError, ValueError, RuntimeError):
+                    pass
         self.exec_btn_dict.pop(task_name, None)
         self.task_manager.remove_widget_dict(task_name)
         if ui is not None:

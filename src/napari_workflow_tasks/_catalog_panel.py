@@ -30,12 +30,13 @@ from qtpy.QtWidgets import (
 )
 
 from . import catalog
-from .catalog import TaskPackage, VersionInfo, task_type
+from .catalog import TaskPackage, VersionInfo, task_kind
 
 logger = logging.getLogger(__name__)
 
 ROLE = Qt.UserRole
-RUNNABLE_TYPES = ("parallel",)  # what the launcher can currently execute
+# What the launcher can run on images loaded in the viewer
+RUNNABLE_TYPES = ("parallel", "non_parallel", "compound")
 
 
 class _LogEmitter(QObject):
@@ -175,7 +176,8 @@ class CatalogPanel(QGroupBox):
         self._snapshot_at = None
 
         worker = create_worker(
-            catalog.iter_catalog, live=self.live_check.isChecked()
+            catalog.iter_catalog, live=self.live_check.isChecked(),
+            _ignore_errors=True,  # handled by _on_worker_error
         )
         worker.yielded.connect(self._on_catalog_item)
         worker.finished.connect(self._on_catalog_done)
@@ -286,10 +288,12 @@ class CatalogPanel(QGroupBox):
 
         gray = QBrush(QColor(140, 140, 140))
         for task in info.task_list:
-            ttype = task_type(task)
+            # Snapshot summaries carry the kind; full manifests are classified
+            ttype = task.get("kind") or task_kind(task)
             child = QTreeWidgetItem(
-                [task["name"], "", ttype]
+                [task["name"], "", ttype.replace("converter_", "converter ")]
             )
+            child.setData(2, ROLE, ttype)
             child.setData(0, ROLE, ("task", pkg_name, task["name"]))
             meta = " · ".join(
                 x for x in (task.get("category"), task.get("modality")) if x
@@ -298,10 +302,13 @@ class CatalogPanel(QGroupBox):
             if ttype not in RUNNABLE_TYPES:
                 for col in range(len(self.COLUMNS)):
                     child.setForeground(col, gray)
-                tooltip = (
-                    f"{ttype} tasks can't be launched from napari yet.\n\n"
-                    + tooltip
+                reason = (
+                    "Converters create new OME-Zarrs from raw data, so they "
+                    "don't run on images loaded in the viewer."
+                    if ttype.startswith("converter") else
+                    f"{ttype} tasks can't be launched from napari."
                 )
+                tooltip = f"{reason}\n\n" + tooltip
             child.setToolTip(0, tooltip[:1500])
             item.addChild(child)
         item.setText(0, f"{pkg_name} ({len(info.task_list)})")
@@ -315,7 +322,9 @@ class CatalogPanel(QGroupBox):
             return
 
         pkg = self._packages[pkg_name]
-        worker = create_worker(catalog.get_display_info, pkg, version)
+        worker = create_worker(
+            catalog.get_display_info, pkg, version, _ignore_errors=True
+        )
         worker.returned.connect(
             lambda info, p=pkg_name, v=version: self._on_info_loaded(p, v, info)
         )
@@ -373,7 +382,7 @@ class CatalogPanel(QGroupBox):
             self.install_btn.setEnabled(False)
             return
         kind, pkg_name, _task, item = sel
-        runnable = kind == "package" or item.text(2) in RUNNABLE_TYPES
+        runnable = kind == "package" or item.data(2, ROLE) in RUNNABLE_TYPES
         self.install_btn.setEnabled(runnable)
         self._update_extras_suggestion()
 
@@ -457,7 +466,7 @@ class CatalogPanel(QGroupBox):
             )
             return catalog.get_version_info(pkg, version), entry
 
-        worker = create_worker(_install)
+        worker = create_worker(_install, _ignore_errors=True)
         worker.returned.connect(
             lambda res: self._on_installed(
                 pkg, version, res[0], res[1], task_name or ""
