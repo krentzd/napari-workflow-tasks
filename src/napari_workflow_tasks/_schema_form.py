@@ -104,11 +104,6 @@ def _type(schema: dict) -> Optional[str]:
     return t
 
 
-def _short(text: str, n: int = 90) -> str:
-    text = " ".join((text or "").split())
-    return text if len(text) <= n else text[: n - 1] + "…"
-
-
 # --------------------------------------------------------------------------
 # Field widgets
 # --------------------------------------------------------------------------
@@ -949,30 +944,14 @@ class _FormBody(QWidget):
                 field.setToolTip(description)
                 simple.addRow(label, field)
 
-        self._sections = {}
         for label_text, field, description, is_required in groups:
-            section = _Collapsible(
+            lay.addWidget(_Collapsible(
                 label_text, field, expanded=is_required, tooltip=description
-            )
-            lay.addWidget(section)
-            self._sections[field] = (section, label_text)
+            ))
 
         # Values right after building = the task's defaults (also for nested
         # models without a top-level "default"); unchanged ones are omitted
         self._pristine = self._safe_values()
-
-        # Mark collapsed sections that differ from the defaults
-        for key, field in self.fields.items():
-            if field in self._sections:
-                field.changed.connect(lambda k=key, f=field: self._mark_modified(k, f))
-
-    def _mark_modified(self, key, field):
-        section, label_text = self._sections[field]
-        try:
-            modified = field.value() != self._pristine.get(key)
-        except SchemaError:
-            modified = True
-        section.button.setText(label_text + ("  • modified" if modified else ""))
 
     def _safe_values(self) -> dict:
         out = {}

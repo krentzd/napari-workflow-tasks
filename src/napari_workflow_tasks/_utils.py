@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-import logging
 from typing import Optional
 
 import numpy as np
 from ngio import Roi
-
-from napari.utils.notifications import show_info
 
 def create_roi_from_bbox(data: np.ndarray, roi_id: Optional[int]= None):
     """Create roi_table roi from 2D bounding box coordinates.
@@ -36,7 +33,3 @@ def create_roi_from_bbox(data: np.ndarray, roi_id: Optional[int]= None):
     roi_crop = Roi(y=y, x=x, x_length=x_length, y_length=y_length, name=name)
     return roi_crop
 
-class NapariHandler(logging.Handler):
-    def emit(self, record):
-        log_entry = self.format(record)
-        show_info(log_entry)

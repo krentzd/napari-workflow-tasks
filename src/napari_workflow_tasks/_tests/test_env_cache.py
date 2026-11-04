@@ -519,51 +519,6 @@ def test_no_build_retry_gives_up_without_names(fake):
     assert len(fake.installs) == len(catalog.candidate_pythons(">=3.11"))
 
 
-# --------------------------------------------------------------------------
-# _widget._prefill_channel: identifier lists with minItems
-# --------------------------------------------------------------------------
-
-
-def test_prefill_channel_min_items(qapp=None):
-    pytest.importorskip("napari")
-    from qtpy.QtWidgets import QApplication
-
-    from napari_workflow_tasks._schema_form import SchemaForm
-    from napari_workflow_tasks._widget import _prefill_channel
-
-    app = QApplication.instance() or QApplication([])  # noqa: F841
-    chan = {
-        "type": "object",
-        "properties": {
-            "mode": {"type": "string", "default": "label"},
-            "identifiers": {"type": "array", "items": {"type": "string"},
-                            "default": [], "minItems": 1},
-        },
-    }
-    schema = {
-        "type": "object",
-        "properties": {
-            "channel": {"$ref": "#/$defs/Chan"},
-            "extra": {"anyOf": [{"$ref": "#/$defs/Chan"}, {"type": "null"}]},
-            "other": {"type": "array", "items": {"type": "string"},
-                      "default": []},
-        },
-        "required": ["channel"],
-        "$defs": {"Chan": chan},
-    }
-    form = SchemaForm(schema)
-    _prefill_channel(form.fields, "DAPI", ["DAPI", "nanog"])
-    args = form.get_args()
-    assert args["channel"]["identifiers"] == ["DAPI"]
-    assert "extra" not in args or args["extra"] in (None, {})
-    assert args.get("other", []) == []
-    # not a channel of the image: nothing prefilled -> minItems error
-    form2 = SchemaForm(schema)
-    _prefill_channel(form2.fields, "nuclei", ["DAPI"])
-    with pytest.raises(Exception, match="at least 1"):
-        form2.get_args()
-
-
 def test_pixi_version_real():
     try:
         pixi = catalog.find_pixi()
