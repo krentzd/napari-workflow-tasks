@@ -379,13 +379,16 @@ class _Source:
 
 def _prepare_source(
     pkg: TaskPackage, version: str, log: Callable[[str], None]
-) -> Optional[_Source]:
+) -> tuple[Optional[_Source], Optional[str]]:
     """Download (cached) and extract the release's source archive into
-    ``env_dir/source``. Returns it if it ships a pixi.lock with a pixi
-    manifest, else None (and nothing is left in ``source``)."""
+    ``env_dir/source``. Returns (source, None) if it ships a pixi.lock with
+    a pixi manifest, else (None, why not) and nothing is left in
+    ``source``. Raises if the archive cannot be downloaded."""
     pv = pkg.get_version(version)
-    if not pv.source_url or has_pixi_lock(pv) is False:
-        return None
+    if not pv.source_url:
+        return None, "the catalog lists no source archive for this release"
+    if has_pixi_lock(pv) is False:
+        return None, "this release ships no pixi.lock"
     url, size, env = pv.source_url, pv.source_size, None
     if is_tag_archive(url):
         # GitHub's tag archive can't be built by hatch-vcs/setuptools-scm
@@ -396,27 +399,22 @@ def _prepare_source(
         else:
             env = _source_build_env(pkg, version)
     if size and size > MAX_SOURCE_DOWNLOAD:
-        log(f"Source archive too large to check for pixi.lock ({size >> 20} MB)")
-        return None
+        return None, ("its source archive is too large to check for a "
+                      f"pixi.lock ({size >> 20} MB)")
 
     log(f"Looking for pixi.lock in {url}")
-    try:
-        archive = _fetch_source(url, log)
-    except Exception as e:  # noqa: BLE001
-        log(f"Could not download the source archive: {e}")
-        return None
+    archive = _fetch_source(url, log)
     if len(archive) > MAX_SOURCE_DOWNLOAD:
-        log(f"Source archive too large ({len(archive) >> 20} MB)")
-        return None
+        return None, ("its source archive is too large to check for a "
+                      f"pixi.lock ({len(archive) >> 20} MB)")
 
     src_dir = env_dir(pkg.pkg_name, version) / SOURCE_SUBDIR
     project = _extract_source(archive, src_dir)
     manifest = _pixi_manifest_in(project)
     if manifest is None or not (project / "pixi.lock").exists():
-        log("No pixi.lock in this release")
         shutil.rmtree(src_dir, ignore_errors=True)
-        return None
-    return _Source(project, manifest, url, env)
+        return None, "this release ships no pixi.lock"
+    return _Source(project, manifest, url, env), None
 
 
 def _pins_text(pins) -> str:
@@ -877,6 +875,7 @@ def install_version(
         try:
             entry = _install_from_recipe(pkg, version, info, recipe, pixi, log)
             entry["recipe_key"] = key
+            entry["lock_note"] = recipe.get("lock_note")
             _save_entry(d, entry, log)
             incomplete.unlink(missing_ok=True)
             return entry
@@ -890,13 +889,21 @@ def install_version(
             (restored.parent / "pixi.lock").unlink(missing_ok=True)
 
     entry = new_recipe = None
+    lock_note = None  # why the env is not from the release's pixi.lock
+    # A fallback after a passing problem (e.g. the network) is not saved
+    # as the recipe, so that the next install tries the pixi.lock again
+    cache_install = True
     if use_lock:
         src = None
         try:
-            src = _prepare_source(pkg, version, log)
+            src, lock_note = _prepare_source(pkg, version, log)
         except Exception as e:  # noqa: BLE001
-            log(f"Could not use the source archive: {type(e).__name__}: {e}")
+            lock_note = ("its pixi.lock could not be checked "
+                         f"({type(e).__name__}: {e})")
+            cache_install = False
             shutil.rmtree(d / SOURCE_SUBDIR, ignore_errors=True)
+        if lock_note:
+            log(f"Not using a pixi.lock: {lock_note}")
         if src is not None:
             try:
                 result = _install_from_source(
@@ -909,6 +916,8 @@ def install_version(
             if result is not None:
                 entry, new_recipe = result
             else:
+                lock_note = ("its pixi.lock could not be used on this "
+                             "computer (see the install log)")
                 log("Falling back to resolving dependencies")
                 shutil.rmtree(d / SOURCE_SUBDIR, ignore_errors=True)
 
@@ -917,9 +926,14 @@ def install_version(
             pkg, version, info, extras, pixi, log, pins, sysreqs, rich=rich,
             skip=skip,
         )
-    if new_recipe is not None and env_cache.recipes_enabled():
+    entry["lock_note"] = lock_note
+    if not cache_install:
+        log("Not caching this install: the next install tries the "
+            "pixi.lock again")
+    elif new_recipe is not None and env_cache.recipes_enabled():
         try:
-            env_cache.save_recipe(recipes_dir(), key, new_recipe)
+            env_cache.save_recipe(
+                recipes_dir(), key, {**new_recipe, "lock_note": lock_note})
             entry["recipe_key"] = key
         except OSError as e:
             log(f"Could not save the install recipe: {e}")

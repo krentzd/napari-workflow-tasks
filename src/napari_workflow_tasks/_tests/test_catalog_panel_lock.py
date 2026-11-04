@@ -110,3 +110,22 @@ def test_skipped_packages_reach_install_version(panel, qtbot, monkeypatch):
         w._install_selected()
     assert calls == [["cupy-cuda12x"]]
     assert "skipped: cupy-cuda12x" in w.status.text()
+
+
+def test_status_says_why_the_lock_was_not_used(panel, qtbot, monkeypatch):
+    w, pkg = panel
+
+    def fake_install(pkg_, version, extras=None, log=print, pins=None,
+                     use_lock=True, skip=None):
+        return {"src_path": "/x", "manifest_path": "/x/m.json",
+                "pixi_manifest_path": "/x/pixi.toml", "version": version,
+                "pixi_frozen": False, "env_kind": "resolved",
+                "pins_applied": None, "skipped": [],
+                "lock_note": "its pixi.lock could not be checked (timed out)"}
+
+    monkeypatch.setattr(install, "install_version", fake_install)
+    monkeypatch.setattr(manifests, "get_version_info", lambda p, v: w._infos[(p.pkg_name, v)])
+    with qtbot.waitSignal(w.installed, timeout=10000):
+        w._install_selected()
+    assert "not from its pixi.lock" in w.status.text()
+    assert "could not be checked" in w.status.text()

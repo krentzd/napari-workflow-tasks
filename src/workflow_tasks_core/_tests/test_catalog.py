@@ -331,6 +331,38 @@ def test_failed_lock_install_falls_back(fake_pixi, monkeypatch):
     assert not (paths.env_dir("my-tasks", "1.2.0") / "source").exists()
 
 
+def test_unavailable_source_is_not_cached(fake_pixi, monkeypatch):
+    # A download problem must not stick: the fallback install is not saved
+    # as the recipe for "use the pixi.lock", so the next install tries again
+    def broken(url, headers=None):
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(task_packages, "http_get", broken)
+    entry = install.install_version(_pkg_with_source(b""), "1.2.0", log=lambda _l: None)
+    assert entry["pixi_frozen"] is False
+    assert "could not be checked" in entry["lock_note"]
+    assert "recipe_key" not in entry
+    assert not list(paths.recipes_dir().glob("*.json"))
+
+
+def test_release_without_lock_is_cached_with_note(fake_pixi, monkeypatch):
+    archive = _tarball({"pyproject.toml": "[project]\nname='my-tasks'\n"})
+    monkeypatch.setattr(task_packages, "http_get", lambda url, headers=None: archive)
+    entry = install.install_version(_pkg_with_source(archive), "1.2.0", log=lambda _l: None)
+    assert entry["lock_note"] == "this release ships no pixi.lock"
+
+
+def test_lock_install_has_no_note(fake_pixi, monkeypatch):
+    archive = _tarball({
+        "pyproject.toml": "[project]\nname='my-tasks'\n[tool.pixi.workspace]\n",
+        "pixi.lock": "version: 6\nenvironments:\n  default:\n    packages:\n      " + pixi_config.current_pixi_platform() + ":\n      - pypi: x\n",
+    })
+    monkeypatch.setattr(task_packages, "http_get", lambda url, headers=None: archive)
+    entry = install.install_version(_pkg_with_source(archive), "1.2.0", log=lambda _l: None)
+    assert entry["pixi_frozen"] is True
+    assert entry["lock_note"] is None
+
+
 def test_use_lock_false_skips_download(fake_pixi, monkeypatch):
     def no_download(url, headers=None):
         raise AssertionError("should not download the source archive")

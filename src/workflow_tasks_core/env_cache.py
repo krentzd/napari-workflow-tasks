@@ -44,7 +44,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
-RECIPE_SCHEMA = 2  # 2: rich-platform manifests, pins_applied
+RECIPE_SCHEMA = 3  # 2: rich-platform manifests, pins_applied; 3: lock_note,
+# no recipe for a fallback after a failed pixi.lock check
 
 DEDUP_ENV_VAR = "NAPARI_WORKFLOW_TASKS_DEDUP"
 RECIPES_ENV_VAR = "NAPARI_WORKFLOW_TASKS_RECIPES"
