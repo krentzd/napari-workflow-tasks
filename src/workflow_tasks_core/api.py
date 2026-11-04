@@ -39,6 +39,7 @@ from .outputs import (
     expected_label_names,
     expected_table_names,
 )
+from .args_io import ImportedArgs, export_args, export_workflow, read_args, write_json
 from .pixi_config import find_pixi
 from .runner import (
     RUNNABLE_KINDS,
@@ -489,7 +490,7 @@ class Task:
         if self.kind == "parallel":
             return dict(args), {}
         if self.kind == "non_parallel":
-            return {}, dict(args)
+            return {}, {**args, **(non_parallel_args or {})}
         if non_parallel_args is not None:
             return dict(args), dict(non_parallel_args)
         np_props = with_defs(self._task.get("args_schema_non_parallel"))["properties"]
@@ -505,6 +506,36 @@ class Task:
             if schema:
                 errors += validate(values, schema)
         return errors
+
+    def read_args(self, path) -> ImportedArgs:
+        """Arguments from a Fractal arguments file (fractal-web's export,
+        ``{"args_parallel": ..., "args_non_parallel": ...}``) or a
+        fractal-server workflow export (this task's entry). Use them as
+        ``task.run(images, **task.read_args(path).run_kwargs())``; check
+        ``.notes`` (e.g. a version mismatch)."""
+        return read_args(path, task_name=self.name,
+                         pkg_name=self.package.name,
+                         version=self.package.version)
+
+    def write_args(self, path, args: Optional[dict] = None, *,
+                   non_parallel_args: Optional[dict] = None,
+                   workflow: bool = False, **kwargs) -> dict:
+        """Write arguments in Fractal's format: an arguments file (as
+        fractal-web exports) or, with ``workflow=True``, a one-task
+        fractal-server workflow that "Import workflow" accepts. Arguments
+        are split between the steps like in :meth:`run`. Returns the JSON."""
+        args_p, args_np = self._split({**(args or {}), **kwargs},
+                                      non_parallel_args)
+        has_p = self.kind in ("parallel", "compound")
+        has_np = self.kind in ("non_parallel", "compound")
+        args_p, args_np = (args_p if has_p else None), (args_np if has_np else None)
+        if workflow:
+            data = export_workflow(self.name, self.package.name,
+                                   self.package.version, args_p, args_np)
+        else:
+            data = export_args(args_p, args_np)
+        write_json(path, data)
+        return data
 
     def validate(self, args: Optional[dict] = None,
                  non_parallel_args: Optional[dict] = None) -> None:

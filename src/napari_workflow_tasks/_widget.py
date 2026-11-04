@@ -9,13 +9,19 @@ from napari.layers import Shapes
 from napari.qt.threading import create_worker
 from napari.utils.notifications import show_error, show_info, show_warning
 from napari_ome_zarr._reader import napari_get_reader
-from qtpy.QtCore import Qt, Signal
-from qtpy.QtGui import QFont, QFontDatabase, QPixmap
-from qtpy.QtWidgets import (QCheckBox, QComboBox, QGroupBox,
+from qtpy.QtCore import QPointF, QSize, Qt, Signal
+from qtpy.QtGui import (QColor, QFont, QFontDatabase, QIcon, QPainter,
+                         QPen, QPixmap, QPolygonF)
+from qtpy.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGroupBox,
                             QHBoxLayout, QLabel, QLineEdit, QListWidget,
                             QListWidgetItem, QMessageBox,
                             QPlainTextEdit, QProgressBar, QPushButton,
-                            QScrollArea, QTabWidget, QVBoxLayout, QWidget)
+                            QScrollArea, QTabWidget, QVBoxLayout,
+                            QWidget)
+
+from workflow_tasks_core.args_io import (args_filename, export_args,
+                                         export_workflow, read_args,
+                                         write_json)
 
 from workflow_tasks_core.outputs import (CHANNEL_PLACEHOLDER, LABEL_NAME_ARGS,
                                          find_task_outputs, new_image_urls,
@@ -265,6 +271,49 @@ def wipe_cache():
     cache_bytes = cache.cache.available_bytes
     cache = resize_dask_cache(nbytes=0)
     cache = resize_dask_cache(nbytes=cache_bytes)
+
+
+def _tray_icon(direction, color, size=16):
+    """Upload/download icon: an open tray with an arrow (as fractal-web)."""
+    pixmap = QPixmap(size * 2, size * 2)  # drawn at 2x for sharp HiDPI
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(color), 2.2)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    w = size * 2
+    # tray
+    painter.drawPolyline(QPolygonF([
+        QPointF(w * 0.12, w * 0.62), QPointF(w * 0.12, w * 0.86),
+        QPointF(w * 0.88, w * 0.86), QPointF(w * 0.88, w * 0.62)]))
+    # arrow
+    top, bottom = w * 0.12, w * 0.66
+    painter.drawLine(QPointF(w / 2, top), QPointF(w / 2, bottom))
+    tip, base = (top, top + w * 0.2) if direction == "up" else (bottom, bottom - w * 0.2)
+    painter.drawPolyline(QPolygonF([
+        QPointF(w / 2 - w * 0.18, base), QPointF(w / 2, tip),
+        QPointF(w / 2 + w * 0.18, base)]))
+    painter.end()
+    pixmap.setDevicePixelRatio(2.0)
+    return QIcon(pixmap)
+
+
+def _outline_button(text, icon, color, tooltip=""):
+    """Outlined button in a given color (like Bootstrap's btn-outline-*)."""
+    button = QPushButton(text)
+    button.setIcon(icon)
+    button.setIconSize(QSize(14, 14))
+    button.setToolTip(tooltip)
+    button.setCursor(Qt.PointingHandCursor)
+    button.setStyleSheet(
+        f"QPushButton {{ color: {color}; border: 1px solid {color}; "
+        "border-radius: 4px; padding: 3px 10px; background: transparent; }"
+        f"QPushButton:hover {{ background: {color}1f; }}"
+        f"QPushButton:pressed {{ background: {color}33; }}"
+    )
+    return button
 
 
 class TasksQWidget(QWidget):
@@ -949,6 +998,26 @@ class TasksQWidget(QWidget):
         scroll.setWidget(params)
         outer.addWidget(scroll, 1)
 
+        # Import/export arguments (Fractal's arguments file format)
+        args_row = QWidget()
+        args_layout = QHBoxLayout(args_row)
+        args_layout.setContentsMargins(0, 0, 0, 0)
+        import_btn = _outline_button(
+            "Import", _tray_icon("up", "#0d6efd"), "#0d6efd",
+            "Load arguments from a Fractal arguments file (fractal-web "
+            "'Export') or a fractal-server workflow export")
+        import_btn.clicked.connect(lambda: self._import_args(task_name))
+        export_btn = _outline_button(
+            "Export", _tray_icon("down", "#6c757d"), "#6c757d",
+            "Save the arguments as a Fractal arguments file "
+            "(args-<task>.json, as fractal-web's 'Export')")
+        export_btn.clicked.connect(
+            lambda: self._export_args(task_name, workflow=False))
+        args_layout.addWidget(import_btn)
+        args_layout.addWidget(export_btn)
+        args_layout.addStretch(1)
+        outer.addWidget(args_row)
+
         # Buttons
         buttons = QWidget()
         buttons_layout = QHBoxLayout(buttons)
@@ -1005,6 +1074,108 @@ class TasksQWidget(QWidget):
         idx = self.tab_container.addTab(page, short)
         self.tab_container.setTabToolTip(idx, task_name)
         self.tab_container.setCurrentIndex(idx)
+
+    # ------------------------------------------------------------------
+    # Import / export of arguments (Fractal formats)
+    # ------------------------------------------------------------------
+
+    def _task_identity(self, task_name):
+        """(task name, package, version) as Fractal names them."""
+        task = self.task_manager.get_task(task_name)
+        pkg, _, pkg_version = task['package_name'].partition('==')
+        return task['base_name'], pkg, task.get('version') or pkg_version
+
+    def _args_dir(self):
+        return getattr(self, '_last_args_dir', None) or str(Path.home())
+
+    def _export_args(self, task_name, workflow=False):
+        ui = self._task_ui[task_name]
+        name, pkg, version = self._task_identity(task_name)
+        try:
+            # All current values (defaults included), like fractal-web; a
+            # required argument that is still empty is simply left out
+            args_p = ui['form'].body.values(omit_defaults=False) if ui.get('form') else None
+            args_np = ui['form_np'].body.values(omit_defaults=False) if ui.get('form_np') else None
+        except SchemaError as e:
+            show_error(f"Cannot export the arguments of {name}: {e}")
+            return
+        if workflow:
+            data = export_workflow(name, pkg, version, args_p, args_np)
+            slug = re.sub(r"\s+", "-", name.strip().lower())
+            default = f"workflow-{slug}.json"
+            title = "Export a Fractal workflow with this task"
+        else:
+            data = export_args(args_p, args_np)
+            default = args_filename(name)
+            title = "Export task arguments"
+        path, _ = QFileDialog.getSaveFileName(
+            self, title, os.path.join(self._args_dir(), default),
+            "JSON files (*.json)")
+        if not path:  # cancelled
+            return
+        try:
+            write_json(path, data)
+        except OSError as e:
+            show_error(f"Could not write {path}: {e}")
+            return
+        self._last_args_dir = os.path.dirname(path)
+        ui['status'].setText(f"Exported arguments to {path}")
+        show_info(f"{name}: exported arguments to {os.path.basename(path)}")
+
+    def _import_args(self, task_name, path=None):
+        ui = self._task_ui[task_name]
+        name, pkg, version = self._task_identity(task_name)
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Import task arguments", self._args_dir(),
+                "JSON files (*.json);;All files (*)")
+            if not path:  # cancelled
+                return
+        try:
+            imported = read_args(path, task_name=name, pkg_name=pkg,
+                                 version=version)
+        except (OSError, ValueError) as e:
+            show_error(f"Cannot import arguments for {name}: {e}")
+            return
+        self._last_args_dir = os.path.dirname(path)
+
+        notes = list(imported.notes)
+        applied = 0
+        for form, args, step in (
+            (ui.get('form'), imported.args_parallel, 'args_parallel'),
+            (ui.get('form_np'), imported.args_non_parallel, 'args_non_parallel'),
+        ):
+            if args is None:
+                continue
+            if form is None:
+                if args:
+                    notes.append(f"{step} not used by this task")
+                continue
+            form.reset()
+            unknown = []
+            for key, value in args.items():
+                if key not in form.fields:
+                    unknown.append(key)
+                    continue
+                try:
+                    form.fields[key].set_value(value)
+                    applied += 1
+                except Exception:  # noqa: BLE001 - value of the wrong type
+                    notes.append(f"could not set {key} to {value!r}")
+            if unknown:
+                notes.append("unknown arguments ignored: " + ", ".join(unknown))
+
+        errors = []
+        for form in (ui.get('form_np'), ui.get('form')):
+            if form is not None:
+                errors += form.validate()
+        msg = f"Imported {applied} argument{'s' if applied != 1 else ''} from {os.path.basename(path)}"
+        if notes:
+            msg += " (" + "; ".join(notes) + ")"
+        if errors:
+            msg += f". Check: {'; '.join(str(e) for e in errors[:3])}"
+        ui['status'].setText(msg)
+        (show_warning if notes or errors else show_info)(f"{name}: {msg}")
 
     def _close_tab(self, task_name):
         ui = self._task_ui.pop(task_name, None)
