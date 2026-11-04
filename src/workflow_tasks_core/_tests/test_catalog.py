@@ -97,6 +97,50 @@ def test_invalid_pin_raises():
         pixi_config.parse_pins(["cellpose<<4"])
 
 
+def test_pixi_manifest_with_skipped_packages(isolated_home, monkeypatch):
+    monkeypatch.setattr(pixi_config.sys, "platform", "darwin")
+    pkg = _pkg()
+    path = pixi_config.write_pixi_manifest(
+        pkg, "1.2.0", [], None, skip=["cupy-cuda12x"], no_build=["pyqt6"]
+    )
+    options = tomllib.loads(path.read_text())["pypi-options"]
+    assert options["no-build"] == ["pyqt6"]
+    # an override whose marker is false on this computer drops the package
+    assert options["dependency-overrides"] == {
+        "cupy-cuda12x": {"version": "*",
+                         "env-markers": "sys_platform != 'darwin'"},
+    }
+
+
+def test_parse_skip():
+    assert pixi_config.parse_skip(["Cupy_CUDA12x", "cupy-cuda12x"]) == [
+        "cupy-cuda12x"
+    ]
+    assert pixi_config.parse_skip(None) == []
+    with pytest.raises(ValueError):
+        pixi_config.parse_skip(["cupy-cuda12x<14"])  # names only
+
+
+def test_install_with_skipped_packages(fake_pixi, monkeypatch):
+    monkeypatch.setattr(pixi_config.sys, "platform", "darwin")
+    entry = install.install_version(
+        _pkg_with_source(b""), "1.2.0", log=lambda _l: None, use_lock=False,
+        skip=["cupy-cuda12x"],
+    )
+    assert entry["skipped"] == ["cupy-cuda12x"]
+    manifest = tomllib.loads(paths.env_dir("my-tasks", "1.2.0")
+                             .joinpath("pixi.toml").read_text())
+    assert "cupy-cuda12x" in manifest["pypi-options"]["dependency-overrides"]
+
+
+def test_suggested_skip(monkeypatch):
+    monkeypatch.setattr(install.sys, "platform", "darwin")
+    assert install.suggested_skip("abbott") == ["cupy-cuda12x"]
+    assert install.suggested_skip("my-tasks") == []
+    monkeypatch.setattr(install.sys, "platform", "linux")
+    assert install.suggested_skip("abbott") == []
+
+
 class _FakeResponse:
     def __init__(self, body, etag):
         self._body, self.headers = body, {"ETag": etag}

@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,7 @@ from .pixi_config import (
     lock_platforms,
     merge_system_requirements,
     parse_pins,
+    parse_skip,
     pixi_config_sysreqs,
     platform_of,
     read_pixi_config,
@@ -46,6 +48,7 @@ from .pixi_config import (
     write_pixi_manifest,
     write_platform_requirements,
     write_pypi_no_build,
+    write_skip_to_pixi_config,
     write_system_requirements,
 )
 from .task_packages import (
@@ -77,6 +80,20 @@ SUGGESTED_PINS = {
     # (ShapeError in abbott_features/features/_base.py).
     "abbott-features": ["polars<2"],
 }
+
+# Dependencies to leave out on platforms where they cannot be installed,
+# per ``sys.platform``; suggested at install, the user can edit or clear
+# them. Tasks that import a skipped package fail when they are run.
+SUGGESTED_SKIP = {
+    # abbott>=0.4 requires cupy-cuda12x (no macOS wheels); only its
+    # warpfield tasks import cupy.
+    "abbott": {"darwin": ["cupy-cuda12x"]},
+}
+
+
+def suggested_skip(pkg_name: str) -> list[str]:
+    """Dependencies of ``pkg_name`` to skip on this computer."""
+    return list(SUGGESTED_SKIP.get(pkg_name, {}).get(sys.platform, []))
 
 
 # --------------------------------------------------------------------------
@@ -416,12 +433,14 @@ def _finish_install(
     pins: Optional[list[str]] = None,
     recipe: Optional[dict] = None,
     pins_how: Optional[str] = None,
+    skip: Optional[list[str]] = None,
 ) -> tuple[dict, dict]:
     """After a successful ``pixi install``: check pins (when given), share
     native libraries with the store, then run the import check unless it
     already passed for this exact env. Returns (entry, check record).
     ``entry["pins_applied"]``: how the pins were applied (``pins_how``),
-    and the installed versions of the pinned packages."""
+    and the installed versions of the pinned packages;
+    ``entry["skipped"]``: the dependencies left out of the environment."""
     frozen = kind == ENV_LOCKED
     pins_applied = None
     if pins:
@@ -489,6 +508,7 @@ def _finish_install(
         "env_kind": kind,
         "version": version,
         "pins_applied": pins_applied,
+        "skipped": list(skip or []),
     }
     return entry, record
 
@@ -519,26 +539,28 @@ def _run_install(cmd: list[str], log, env: Optional[dict] = None) -> str:
 
 def _install_from_source(
     pkg, version, info, src: _Source, pixi: str, log, extras, pins,
-    sysreqs: dict, rich: bool = True,
+    sysreqs: dict, rich: bool = True, skip: Optional[list[str]] = None,
 ) -> Optional[tuple[dict, dict]]:
     """(a) the release's own pixi.lock (``pixi install --frozen``) when it
     satisfies the pins, else (b) a re-solve of its pixi config with the
-    host's system requirements and the pins. None = use the resolved
-    install (c)."""
+    host's system requirements, the pins and the skipped packages. None =
+    use the resolved install (c)."""
     manifest, project = src.manifest, src.project
     lock = project / "pixi.lock"
     plat = pixi_config.current_pixi_platform()
     lock_text = lock.read_text(errors="ignore")
 
-    def _done(kind: str, check_pins, how=None, **extra) -> tuple[dict, dict]:
+    def _done(kind: str, check_pins, how=None, skipped=None,
+              **extra) -> tuple[dict, dict]:
         entry, check = _finish_install(
             pkg, version, info, pixi, manifest, kind, log, pins=check_pins,
-            pins_how=how,
+            pins_how=how, skip=skipped,
         )
         recipe = _make_recipe(
             pkg, version, kind, manifest, source_url=src.url,
             build_env=bool(src.env), check=check,
-            pins_applied=entry.get("pins_applied"), **extra,
+            pins_applied=entry.get("pins_applied"),
+            skipped=entry["skipped"], **extra,
         )
         return entry, recipe
 
@@ -571,6 +593,9 @@ def _install_from_source(
         if extras:
             log("Extras are not used for the pixi.lock install (only if it "
                 "falls back to resolving dependencies)")
+        if skip:
+            log("Skipped packages are not used for the pixi.lock install "
+                "(only if it falls back to resolving dependencies)")
         lock_sha = env_cache.file_sha256(lock)
         try:
             _run_install(
@@ -622,6 +647,9 @@ def _install_from_source(
             applied = write_pins_to_pixi_config(manifest, pins, kinds, pkg.pkg_name)
             how = "added to the package's pixi config: " + "; ".join(applied)
             log(f"Pinned packages {how}")
+        if skip:
+            write_skip_to_pixi_config(manifest, skip)
+            log(f"Skipped packages: {', '.join(skip)}")
     except (RuntimeError, ValueError, KeyError) as e:
         log(f"Could not adapt the package's pixi config: {e}")
         return None
@@ -638,7 +666,8 @@ def _install_from_source(
     try:
         _install_with_no_build_retry(_install, pkg.pkg_name, no_build, log)
         # A re-solved env can drift like the resolved one: pins must hold
-        return _done(ENV_PIXI_CONFIG, pins, how=how, no_build=no_build)
+        return _done(ENV_PIXI_CONFIG, pins, how=how, skipped=skip,
+                     no_build=no_build)
     except RuntimeError as e:
         log(f"Install from the package's pixi config failed: {e}")
     return None
@@ -646,16 +675,19 @@ def _install_from_source(
 
 def _install_from_wheel(
     pkg, version, info, extras, pixi, log, pins, sysreqs: dict,
-    rich: bool = True,
+    rich: bool = True, skip: Optional[list[str]] = None,
 ) -> tuple[dict, dict]:
     """(c) generated pixi.toml with the wheel (or sdist) as a pypi
-    dependency, and the pins as pypi dependencies. Tries each allowed
+    dependency, the pins as pypi dependencies and the skipped packages as
+    dependency overrides. Tries each allowed
     Python; a failed source build of a dependency is retried with source
     builds of that package disabled."""
     source = resolve_install_source(pkg, version, info.requires_python)
     log(f"Installing {pkg.pkg_name}=={version} from {source.description}")
     if pins:
         log(f"Pinned packages (pypi-dependencies): {_pins_text(pins)}")
+    if skip:
+        log(f"Skipped packages: {', '.join(skip)}")
     errors = []
     no_build: list[str] = []
     for i, py in enumerate(source.pythons):
@@ -663,7 +695,7 @@ def _install_from_wheel(
             manifest = write_pixi_manifest(
                 pkg, version, extras, info.requires_python, pins=pins,
                 python=py, source=source, system_requirements=sysreqs,
-                no_build=nb, rich_platforms=rich,
+                no_build=nb, rich_platforms=rich, skip=skip,
             )
             log(f"Installing {pkg.pkg_name}=={version} (Python {py}) "
                 f"into {manifest.parent}")
@@ -691,11 +723,12 @@ def _install_from_wheel(
     entry, check = _finish_install(
         pkg, version, info, pixi, manifest, ENV_RESOLVED, log, pins=pins,
         pins_how="added to the generated pixi.toml (pypi-dependencies)",
+        skip=skip,
     )
     recipe = _make_recipe(
         pkg, version, ENV_RESOLVED, manifest, python=py, no_build=no_build,
         source=source.description, check=check,
-        pins_applied=entry.get("pins_applied"),
+        pins_applied=entry.get("pins_applied"), skipped=entry["skipped"],
     )
     return entry, recipe
 
@@ -735,6 +768,7 @@ def _install_from_recipe(
     entry, _check = _finish_install(
         pkg, version, info, pixi, manifest, kind, log, recipe=recipe,
         pins=applied.get("pins"), pins_how=applied.get("how"),
+        skip=recipe.get("skipped"),
     )
     entry["from_recipe"] = True
     return entry
@@ -749,6 +783,7 @@ def install_recipe_key(
     pixi: str,
     use_lock: bool = True,
     pixi_ver: Optional[str] = None,
+    skip: Optional[list[str]] = None,
 ) -> str:
     """Key of the install recipe: everything that decides what gets
     installed. (The release is identified by the catalog's wheel URL, so
@@ -767,6 +802,7 @@ def install_recipe_key(
                  else pixi_config.pixi_version(pixi)),
         "pythons": list(task_packages.PREFERRED_PYTHONS),
         "use_lock": bool(use_lock),
+        "skip": sorted(parse_skip(skip)),
     })
 
 
@@ -777,6 +813,7 @@ def install_version(
     log: Callable[[str], None] = print,
     pins: Optional[list[str]] = None,
     use_lock: bool = True,
+    skip: Optional[list[str]] = None,
 ) -> dict:
     """
     Create/update the pixi env for (package, version), check that its task
@@ -800,11 +837,16 @@ def install_version(
     Every path ends with the native-library dedup and the import check
     (``check_env``); a failed check falls through to the next path.
 
+    ``skip``: dependencies to leave out of the env (e.g. packages that
+    cannot be installed on this platform, see SUGGESTED_SKIP); used by
+    (b) and (c), not by the pixi.lock install (a).
+
     The env is marked incomplete until everything succeeded, so a failed
     install is kept for debugging but not reported by ``is_installed``.
     """
     info = manifests.get_version_info(pkg, version)
     extras = list(extras or [])
+    skip = parse_skip(skip)
     pixi = pixi_config.find_pixi()
     d = env_dir(pkg.pkg_name, version)
     d.mkdir(parents=True, exist_ok=True)
@@ -825,7 +867,8 @@ def install_version(
                f"[system-requirements] table: {pixi_ver} predates "
                "per-platform requirements") + ")")
     key = install_recipe_key(
-        pkg, version, extras, pins, sysreqs, pixi, use_lock, pixi_ver=pixi_ver
+        pkg, version, extras, pins, sysreqs, pixi, use_lock, pixi_ver=pixi_ver,
+        skip=skip,
     )
 
     recipe = env_cache.load_recipe(recipes_dir(), key, log)
@@ -856,7 +899,7 @@ def install_version(
             try:
                 result = _install_from_source(
                     pkg, version, info, src, pixi, log, extras, pins, sysreqs,
-                    rich=rich,
+                    rich=rich, skip=skip,
                 )
             except RuntimeError as e:
                 log(f"{e}")
@@ -869,7 +912,8 @@ def install_version(
 
     if entry is None:
         entry, new_recipe = _install_from_wheel(
-            pkg, version, info, extras, pixi, log, pins, sysreqs, rich=rich
+            pkg, version, info, extras, pixi, log, pins, sysreqs, rich=rich,
+            skip=skip,
         )
     if new_recipe is not None and env_cache.recipes_enabled():
         try:

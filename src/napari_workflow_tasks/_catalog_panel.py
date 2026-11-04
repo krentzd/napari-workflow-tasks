@@ -50,6 +50,12 @@ PINS_TOOLTIP = (
     "Extra version constraints for this task's environment, comma "
     "separated. Pinned versions always win. Re-install to apply."
 )
+SKIP_TOOLTIP = (
+    "Dependencies to leave out of this task's environment, comma "
+    "separated, e.g. packages that cannot be installed on this computer. "
+    "Tasks that import them fail when they are run. Not used for the "
+    "install from a release's pixi.lock. Re-install to apply."
+)
 PINS_LOCK_TOOLTIP = (
     "This release ships a pixi.lock: it is used as is if it satisfies the "
     "pins, otherwise the package's pixi config is re-solved with them "
@@ -135,6 +141,17 @@ class CatalogPanel(QGroupBox):
         self.pins_edit.setToolTip(PINS_TOOLTIP)
         pins_row.layout().addWidget(self.pins_edit)
         layout.addWidget(pins_row)
+
+        # Dependencies to leave out (e.g. CUDA-only packages on macOS)
+        skip_row = QWidget()
+        skip_row.setLayout(QHBoxLayout())
+        skip_row.layout().setContentsMargins(0, 0, 0, 0)
+        skip_row.layout().addWidget(QLabel("Skip packages:"))
+        self.skip_edit = QLineEdit()
+        self.skip_edit.setPlaceholderText("e.g. cupy-cuda12x")
+        self.skip_edit.setToolTip(SKIP_TOOLTIP)
+        skip_row.layout().addWidget(self.skip_edit)
+        layout.addWidget(skip_row)
 
         self.lock_check = QCheckBox("Use the package's pixi.lock when available")
         self.lock_check.setChecked(True)
@@ -452,6 +469,7 @@ class CatalogPanel(QGroupBox):
         self.pins_edit.setText(
             ", ".join(install.SUGGESTED_PINS.get(pkg_name, []))
         )
+        self.skip_edit.setText(", ".join(install.suggested_skip(pkg_name)))
         self._extras_tip = (
             "Available extras: " + (", ".join(info.extras) or "none")
             if info else ""
@@ -500,6 +518,9 @@ class CatalogPanel(QGroupBox):
         pins = [
             p.strip() for p in self.pins_edit.text().split(",") if p.strip()
         ]
+        skip = [
+            s.strip() for s in self.skip_edit.text().split(",") if s.strip()
+        ]
         use_lock = self.lock_check.isChecked()
 
         self.install_btn.setEnabled(False)
@@ -514,7 +535,7 @@ class CatalogPanel(QGroupBox):
         def _install():
             entry = install.install_version(
                 pkg, version, extras=extras, log=emitter.line.emit, pins=pins,
-                use_lock=use_lock,
+                use_lock=use_lock, skip=skip,
             )
             emitter.line.emit("Reading the task list")
             return manifests.get_version_info(pkg, version), entry
@@ -554,6 +575,9 @@ class CatalogPanel(QGroupBox):
         pins = entry.get("pins_applied")
         if pins:
             how += f" (pinned: {', '.join(pins['pins'])})"
+        skipped = entry.get("skipped")
+        if skipped:
+            how += f" (skipped: {', '.join(skipped)})"
         self.status.setText(f"Installed {pkg.pkg_name}=={version}{how}.")
         show_info(f"Installed {pkg.pkg_name}=={version}{how}")
         self.installed.emit(pkg, version, info, entry, task_name)

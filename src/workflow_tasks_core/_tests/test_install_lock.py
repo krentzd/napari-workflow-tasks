@@ -84,6 +84,22 @@ def test_write_system_requirements_pixi_toml(tmp_path):
     assert d["tasks"] == {"a": "b"} and d["workspace"]["name"] == "x"
 
 
+def test_write_skip_to_pixi_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(pixi_config.sys, "platform", "darwin")
+    p = tmp_path / "pixi.toml"
+    p.write_text('[workspace]\nname = "x"\n\n[pypi-options]\n'
+                 'no-build = ["pyqt6"]\n'
+                 'dependency-overrides = { numpy = "<2" }\n')
+    pixi_config.write_skip_to_pixi_config(p, ["cupy-cuda12x"])
+    options = tomllib.loads(p.read_text())["pypi-options"]
+    assert options["no-build"] == ["pyqt6"]
+    assert options["dependency-overrides"] == {
+        "numpy": "<2",
+        "cupy-cuda12x": {"version": "*",
+                         "env-markers": "sys_platform != 'darwin'"},
+    }
+
+
 # --------------------------------------------------------------------------
 # GitHub source archive: release sdist asset, tag archive only as fallback
 # --------------------------------------------------------------------------

@@ -162,13 +162,15 @@ def test_install_recipe_key_inputs(monkeypatch):
     pkg = _pkg()
     key = lambda **kw: install.install_recipe_key(  # noqa: E731
         pkg, "1.0", kw.get("extras", []), kw.get("pins"),
-        kw.get("sysreqs", {"macos": "26.7.1"}), "pixi")
+        kw.get("sysreqs", {"macos": "26.7.1"}), "pixi", skip=kw.get("skip"))
     base = key()
     assert base == key()
     # pin normalisation: spacing / order of specifiers do not matter
     assert key(pins=["numpy <2, >=1.20"]) == key(pins=["numpy>=1.20,<2"])
     assert key(pins=["numpy<2"]) != base
     assert key(extras=["gpu"]) != base
+    assert key(skip=["cupy-cuda12x"]) != base
+    assert key(skip=["Cupy_CUDA12x"]) == key(skip=["cupy-cuda12x"])
     assert key(sysreqs={"macos": "13.0"}) != base
     monkeypatch.setattr(pixi_config, "pixi_version", lambda pixi: "pixi 0.84.0")
     assert key() != base

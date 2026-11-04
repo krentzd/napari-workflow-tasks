@@ -262,6 +262,30 @@ def parse_pins(pins: Optional[list[str]]) -> dict[str, str]:
     return parsed
 
 
+def parse_skip(skip: Optional[list[str]]) -> list[str]:
+    """["Cupy_CUDA12x"] -> ["cupy-cuda12x"]: names of packages to leave out
+    of the environment (no versions or markers)."""
+    names = []
+    for name in skip or []:
+        try:
+            req = Requirement(name)
+        except InvalidRequirement as e:
+            raise ValueError(f"Invalid package to skip {name!r}: {e}") from e
+        if req.specifier or req.marker or req.url:
+            raise ValueError(
+                f"Give only the name of a package to skip, not {name!r}")
+        names.append(normalize_package_name(req.name))
+    return list(dict.fromkeys(names))
+
+
+def skip_override() -> dict:
+    """pixi ``dependency-overrides`` entry that leaves a package out: its
+    marker is false on this computer, so the package is never installed
+    here, even when a dependency requires it (e.g. cupy-cuda12x, which has
+    no macOS wheels)."""
+    return {"version": "*", "env-markers": f"sys_platform != '{sys.platform}'"}
+
+
 # Declare the host's system requirements (host_system_requirements) in
 # generated manifests. Set False to get pixi's defaults.
 DECLARE_SYSTEM_REQUIREMENTS = True
@@ -348,11 +372,13 @@ def write_pixi_manifest(
     log: Optional[Callable[[str], None]] = None,
     no_build: Optional[list[str]] = None,
     rich_platforms: Optional[bool] = None,
+    skip: Optional[list[str]] = None,
 ) -> Path:
     """Write a pixi.toml that pins exactly this package version.
     ``system_requirements`` (default: the host's) go on the platform entry
     (``rich_platforms``, default: when this pixi supports it), else into a
-    ``[system-requirements]`` table."""
+    ``[system-requirements]`` table. Packages in ``skip`` are left out of
+    the environment (see skip_override)."""
     if source is None:
         source = resolve_install_source(pkg, version, requires_python)
     py = python or source.pythons[0]
@@ -392,6 +418,10 @@ def write_pixi_manifest(
     if no_build:
         # Use only wheels for these (their source build failed here)
         content += f"\n[pypi-options]\nno-build = {_toml_list(no_build)}\n"
+    if skip:
+        content += "\n[pypi-options.dependency-overrides]\n"
+        for name in parse_skip(skip):
+            content += f"{name} = {_toml_value(skip_override())}\n"
     d = env_dir(pkg.pkg_name, version)
     d.mkdir(parents=True, exist_ok=True)
     path = d / "pixi.toml"
@@ -818,6 +848,20 @@ def write_pypi_no_build(manifest: Path, names: list[str]) -> list[str]:
     opts["no-build"] = merged
     _replace_pixi_table(manifest, "pypi-options", opts)
     return merged
+
+
+def write_skip_to_pixi_config(manifest: Path, skip: list[str]) -> None:
+    """Leave the packages in ``skip`` out of the environment of
+    ``manifest``: add them to pixi's ``[pypi-options]
+    dependency-overrides`` (keeping the other pypi-options and overrides).
+    """
+    cfg = read_pixi_config(manifest) or {}
+    opts = dict(cfg.get("pypi-options") or {})
+    overrides = dict(opts.get("dependency-overrides") or {})
+    for name in parse_skip(skip):
+        overrides[name] = skip_override()
+    opts["dependency-overrides"] = overrides
+    _replace_pixi_table(manifest, "pypi-options", opts)
 
 
 def locked_versions(pixi: str, manifest: Path) -> dict[str, str]:
