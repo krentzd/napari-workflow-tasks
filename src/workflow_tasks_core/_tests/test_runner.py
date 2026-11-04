@@ -165,3 +165,12 @@ def test_stream_process_returns_exit_code():
             break
     assert lines == ["a", "b"]
     assert returncode == 3
+
+
+def test_failure_carries_partial_result(scripts):
+    job = _job(scripts, "parallel", stop_on_error=True)
+    job.executable_parallel = str(scripts / "fail.py")
+    with pytest.raises(TaskFailed) as info:
+        _run(job)
+    assert info.value.result.failed == ["/d/p.zarr/B/03/0"]
+    assert info.value.result.processed_zarr_urls == []

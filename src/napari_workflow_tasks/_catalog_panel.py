@@ -170,7 +170,7 @@ class CatalogPanel(QGroupBox):
         layout.addWidget(self.lock_check)
 
         # Install
-        self.install_btn = QPushButton("Install task")
+        self.install_btn = QPushButton("Install package")
         self.install_btn.setEnabled(False)
         self.install_btn.clicked.connect(self._install_selected)
         layout.addWidget(self.install_btn)

@@ -1,6 +1,7 @@
 """
-Read what an OME-Zarr image holds from its metadata alone: its label images
-and its channel labels (NGFF v0.4 ``.zattrs`` or v0.5 ``zarr.json``).
+Read what an OME-Zarr image holds from its metadata alone: its label images,
+its tables and its channel labels (NGFF v0.4 ``.zattrs`` or v0.5
+``zarr.json``).
 
 Used to find the labels a task added to an image and to suggest channel
 names in task forms.
@@ -43,4 +44,24 @@ def channel_labels(zarr_url: str) -> list[str]:
         labels = [c.get('label') for c in channels if isinstance(c, dict) and c.get('label')]
         if labels:
             return labels
+    return []
+
+
+def list_tables(zarr_url: str) -> list[str]:
+    """Table names of an OME-Zarr image (``tables`` group), [] if none."""
+    tables_dir = Path(zarr_url) / 'tables'
+    for fname, paths in (('.zattrs', (('tables',),)),
+                         ('zarr.json', (('attributes', 'tables'),
+                                        ('attributes', 'ome', 'tables')))):
+        try:
+            with open(tables_dir / fname) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for keys in paths:
+            value = data
+            for key in keys:
+                value = value.get(key, {}) if isinstance(value, dict) else {}
+            if isinstance(value, list):
+                return value
     return []

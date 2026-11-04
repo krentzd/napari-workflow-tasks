@@ -253,3 +253,48 @@ def test_install_retries_without_source_build(monkeypatch, isolated_home):
     assert len(written) == 2
     assert written[1]["pypi-options"]["no-build"] == ["pyqt6"]
     assert written[1]["dependencies"]["python"] == "3.12.*"  # same Python
+
+
+# --------------------------------------------------------------------------
+# The install entry of an installed package (read without the catalog)
+# --------------------------------------------------------------------------
+
+
+def test_install_saves_its_entry(monkeypatch, isolated_home):
+    test_install_retries_next_python(monkeypatch, isolated_home)
+    # the faked pixi install created no environment
+    (paths.env_dir("my-tasks", "1.0") / ".pixi" / "envs").mkdir(parents=True)
+    entry = install.installed_entry("my-tasks", "1.0")
+    assert entry["src_path"] == "/env/my_tasks"
+    assert entry["version"] == "1.0"
+    assert entry["pixi_manifest_path"].endswith("pixi.toml")
+
+
+def _old_env(root, manifest_dir, pkg_dir):
+    """An env installed before entries were saved: only the import check."""
+    from workflow_tasks_core import env_cache
+    prefix = manifest_dir / ".pixi" / "envs" / "default"
+    prefix.mkdir(parents=True)
+    env_cache.save_check(prefix, {"ok": True, "pkg_dir": str(pkg_dir)})
+    return prefix
+
+
+def test_installed_entry_of_older_install(isolated_home, tmp_path):
+    d = paths.env_dir("old-tasks", "2.0")
+    src = d / "source" / "old_tasks-2.0"
+    pkg_dir = src / "src" / "old_tasks"
+    pkg_dir.mkdir(parents=True)
+    (src / "pyproject.toml").write_text("[tool.pixi.workspace]\n")
+    (src / "pixi.lock").write_text("version: 6\n")
+    _old_env(tmp_path, src, pkg_dir)
+    entry = install.installed_entry("old-tasks", "2.0")
+    assert entry["src_path"] == str(pkg_dir)
+    assert entry["manifest_path"] == str(pkg_dir / "__FRACTAL_MANIFEST__.json")
+    assert entry["pixi_manifest_path"] == str(src / "pyproject.toml")
+    assert entry["pixi_frozen"] is False
+    assert entry["version"] == "2.0"
+
+
+def test_installed_entry_missing(isolated_home):
+    with pytest.raises(FileNotFoundError, match="not installed"):
+        install.installed_entry("nope", "1.0")

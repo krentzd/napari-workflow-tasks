@@ -10,6 +10,7 @@ from workflow_tasks_core.outputs import (
     new_image_urls,
     new_label_names,
     reported_image_urls,
+    rewritten_inputs,
 )
 
 LABEL_PROPS = {
@@ -172,6 +173,18 @@ def test_find_task_outputs(tmp_path):
     assert outputs.image_urls == [
         "/elsewhere/new.zarr", str(tmp_path / "img_blur.zarr")]
     assert outputs.missing == [f"image {tmp_path / 'img.zarr_x'}"]
+    assert outputs.input_rewritten is False
+
+
+def test_find_task_outputs_input_rewritten(tmp_path):
+    # e.g. Apply Registration to Image with overwrite_input: the task
+    # replaces the input image and reports it in image_list_updates
+    url = _image(tmp_path / "img.zarr")
+    out = tmp_path / "out.json"
+    out.write_text(json.dumps({"image_list_updates": [{"zarr_url": url}]}))
+    outputs = find_task_outputs({"zarr_url": url}, {}, str(out), set())
+    assert outputs.input_rewritten is True
+    assert outputs.image_urls == []
 
 
 def test_find_task_outputs_missing_label(tmp_path):
@@ -196,3 +209,60 @@ def test_new_image_urls():
     updates = [{"zarr_url": "/d/0/"}, {"zarr_url": "/d/1"},
                {"zarr_url": "/d/1"}, {"origin": "/d/0"}]
     assert new_image_urls(updates, ["/d/0"]) == ["/d/1"]
+
+
+# --------------------------------------------------------------------------
+# Tables named by the arguments
+# --------------------------------------------------------------------------
+
+MASKING_DEFS = {
+    "Create": {"type": "object", "properties": {
+        "mode": {"const": "Create", "default": "Create"},
+        "table_name": {"type": "string", "default": "{label_name}_masking_ROI_table"},
+    }},
+    "Skip": {"type": "object", "properties": {
+        "mode": {"const": "Skip", "default": "Skip"}}},
+}
+MASKING_SCHEMA = {
+    "properties": {
+        "channels": {"type": "object"},
+        "label_name": {"type": "string", "default": "{channel_identifier}_segmented"},
+        "create_masking_roi_table": {
+            "oneOf": [{"$ref": "#/$defs/Create"}, {"$ref": "#/$defs/Skip"}],
+            "discriminator": {"propertyName": "mode", "mapping": {
+                "Create": "#/$defs/Create", "Skip": "#/$defs/Skip"}},
+            "default": {"mode": "Skip"},
+        },
+        "output_table_name": {"type": "string"},
+        "input_roi_table": {"type": "string", "default": "FOV_ROI_table"},
+    },
+    "$defs": MASKING_DEFS,
+}
+
+
+def test_tables_from_nested_default_template():
+    from workflow_tasks_core.outputs import expected_table_names
+    args = {"channels": {"identifiers": ["DAPI"]},
+            "create_masking_roi_table": {"mode": "Create"}}
+    assert expected_table_names(args, MASKING_SCHEMA) == [
+        "DAPI_segmented_masking_ROI_table"]
+
+
+def test_tables_skip_variant_and_inputs_ignored():
+    from workflow_tasks_core.outputs import expected_table_names
+    args = {"channels": {"identifiers": ["DAPI"]}}
+    assert expected_table_names(args, MASKING_SCHEMA) == []
+
+
+def test_tables_output_table_name():
+    from workflow_tasks_core.outputs import expected_table_names
+    args = {"output_table_name": "features",
+            "create_masking_roi_table": {"mode": "Create", "table_name": "m"}}
+    assert expected_table_names(args, MASKING_SCHEMA) == ["m", "features"]
+
+
+def test_rewritten_inputs():
+    updates = [{"zarr_url": "/d/0/"}, {"zarr_url": "/d/1_registered",
+                                       "origin": "/d/1"}]
+    assert rewritten_inputs(updates, ["/d/0", "/d/1"]) == ["/d/0"]
+    assert rewritten_inputs([], ["/d/0"]) == []

@@ -10,3 +10,9 @@ Rule: nothing in this package may import napari, Qt (qtpy, PyQt5/6,
 PySide2/6, superqt), magicgui or napari_ome_zarr, not even indirectly
 (see ``_tests/test_no_napari.py``).
 """
+
+from .api import Catalog, Package, Task
+from .runner import TaskFailed
+from .schema import SchemaError
+
+__all__ = ["Catalog", "Package", "Task", "SchemaError", "TaskFailed"]

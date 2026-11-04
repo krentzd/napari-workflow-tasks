@@ -118,9 +118,14 @@ def default_zarr_dir(zarr_urls: list[str]) -> str:
 class TaskFailed(Exception):
     """A task step failed.
 
+    ``result``: the :class:`TaskResult` so far (which images were processed
+    and which failed) when a per-image step failed, else None.
+
     Not a RuntimeError on purpose: superqt's generator workers treat a
     RuntimeError as "worker deleted" and swallow it (no errored/finished).
     """
+
+    result = None
 
 
 @dataclass
@@ -248,6 +253,7 @@ def _run_per_image(
             result.failed.append(url)
             yield f"✗ {short_name(url)} failed: {e}"
             if job.stop_on_error:
+                e.result = result
                 raise
             continue
         _merge(result, output)

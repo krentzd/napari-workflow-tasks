@@ -19,7 +19,7 @@ from qtpy.QtWidgets import (QCheckBox, QComboBox, QGroupBox,
 
 from workflow_tasks_core.outputs import (CHANNEL_PLACEHOLDER, LABEL_NAME_ARGS,
                                          find_task_outputs, new_image_urls,
-                                         new_label_names)
+                                         new_label_names, rewritten_inputs)
 from workflow_tasks_core.pixi_config import find_pixi
 from workflow_tasks_core.rois import write_roi_table
 from workflow_tasks_core.runner import (TaskJob, default_zarr_dir,
@@ -164,6 +164,19 @@ def layer_image_urls(layer) -> list[str]:
     path = getattr(getattr(layer, "source", None), "path", None)
     path = path or layer.metadata.get("zarr_url")
     return image_urls(path)
+
+
+def _from_other_image(layer, zarr_url) -> bool:
+    """Whether ``layer`` is known to show a different image than
+    ``zarr_url`` (layers of unknown origin are not)."""
+    urls = {os.path.normpath(u) for u in layer_image_urls(layer)}
+    return bool(urls) and os.path.normpath(zarr_url) not in urls
+
+
+def _without_napari_suffix(layer_name):
+    """Layer name without the " [1]", " [2]", ... napari adds to a name
+    that is already taken (e.g. "org [1]" -> "org")."""
+    return re.sub(r' \[\d+\]$', '', layer_name)
 
 
 def _label_name(layer_name):
@@ -434,7 +447,13 @@ class TasksQWidget(QWidget):
 
         shown = []
         not_loaded = []
-        if label_names:
+        if outputs.input_rewritten:
+            # The open layers of the input still show the old data
+            added = self._reload_image(path_to_zarr, label_names)
+            shown += added
+            not_loaded += [f"label '{n}' from {path_to_zarr}"
+                           for n in sorted(label_names) if n not in added]
+        elif label_names:
             added = self._load_zarr_layers(path_to_zarr, labels=label_names)
             shown += added
             not_loaded += [f"label '{n}' from {path_to_zarr}"
@@ -459,13 +478,17 @@ class TasksQWidget(QWidget):
 
         self._update_execute_buttons(is_enabled=True)
 
-    def _load_zarr_layers(self, zarr_url, labels=None, suffix=None):
+    def _load_zarr_layers(self, zarr_url, labels=None, suffix=None,
+                          images=None):
         """
         Add layers of an OME-Zarr image to the viewer.
 
-        labels: only add these label layers (and no image layers).
-        suffix: add everything, naming layers "<name> [<suffix>]".
+        labels: only add these label layers (default: all of them).
+        images: add the image layers (default: when no labels are given).
+        suffix: name layers "<name> [<suffix>]".
         """
+        if images is None:
+            images = labels is None
         reader = napari_get_reader(zarr_url)
         if reader is None:
             logger.warning(f'Cannot read {zarr_url}')
@@ -477,9 +500,11 @@ class TasksQWidget(QWidget):
             layer_type = layer_data[2] if len(layer_data) > 2 else 'image'
             if layer_type == 'labels':
                 meta['name'] = _label_name(meta.get('name'))
-            if labels is not None:
-                if layer_type != 'labels' or meta.get('name') not in labels:
+            if layer_type == 'labels':
+                if labels is not None and meta.get('name') not in labels:
                     continue
+            elif not images:
+                continue
 
             # Names may be a list (one per channel)
             names = meta.get('name')
@@ -490,12 +515,14 @@ class TasksQWidget(QWidget):
                     names = f'{names} [{suffix}]'
                 meta['name'] = names
 
-            # Replace stale layers with the same name(s); label layers may
-            # have been opened under their path name
+            # Replace stale layers with the same name(s) of this image;
+            # label layers may have been opened under their path name
             for n in names if isinstance(names, (list, tuple)) else [names]:
                 if n is None:
                     continue
                 for layer in list(self._viewer.layers):
+                    if _from_other_image(layer, zarr_url):
+                        continue
                     if layer.name == n or (
                         layer_type == 'labels'
                         and isinstance(layer, napari.layers.Labels)
@@ -511,6 +538,30 @@ class TasksQWidget(QWidget):
                 # Lets the layer be used as input for the next task
                 layer.metadata['zarr_url'] = zarr_url
                 added.append(layer.name)
+        return added
+
+    def _reload_image(self, zarr_url, labels=()):
+        """Read an image again that a task rewrote in place (e.g. Apply
+        Registration to Image with overwrite_input): replace its image
+        layers and its open label layers, and add the label layers in
+        ``labels``. Returns the names of the added layers."""
+        old = [layer for layer in self._viewer.layers
+               if [os.path.normpath(u) for u in layer_image_urls(layer)]
+               == [os.path.normpath(zarr_url)]]
+        open_labels = {_label_name(_without_napari_suffix(layer.name))
+                       for layer in old
+                       if isinstance(layer, napari.layers.Labels)}
+        was_selected = self._image_layers.currentText() in {
+            layer.name for layer in old}
+        for layer in old:
+            self._viewer.layers.remove(layer)
+        added = self._load_zarr_layers(
+            zarr_url, labels=open_labels | set(labels), images=True)
+        if was_selected:
+            for name in added:
+                if isinstance(self._viewer.layers[name], napari.layers.Image):
+                    self._image_layers.setCurrentText(name)
+                    break
         return added
 
     def _update_execute_buttons(self, is_enabled=True):
@@ -646,11 +697,15 @@ class TasksQWidget(QWidget):
         many = len(inputs) > 1
         props = self.task_manager.get_properties(task_name)
 
+        rewritten = rewritten_inputs(result.image_list_updates, inputs)
         shown = []
         for url in inputs:
             names = new_label_names(
                 url, before.get(url, set()), ui.get('args', {}), props)
-            if names:
+            if url in rewritten:
+                # The open layers of this input still show the old data
+                shown += self._reload_image(url, names)
+            elif names:
                 shown += self._load_zarr_layers(
                     url, labels=names, suffix=short_name(url) if many else None)
 

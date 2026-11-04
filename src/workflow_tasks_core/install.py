@@ -11,6 +11,7 @@ shares native libraries with the store and checks that the tasks import
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import shutil
@@ -876,6 +877,7 @@ def install_version(
         try:
             entry = _install_from_recipe(pkg, version, info, recipe, pixi, log)
             entry["recipe_key"] = key
+            _save_entry(d, entry, log)
             incomplete.unlink(missing_ok=True)
             return entry
         except Exception as e:  # noqa: BLE001
@@ -921,8 +923,52 @@ def install_version(
             entry["recipe_key"] = key
         except OSError as e:
             log(f"Could not save the install recipe: {e}")
+    _save_entry(d, entry, log)
     incomplete.unlink(missing_ok=True)
     return entry
+
+
+# The entry install_version returned, kept in the env folder so that an
+# installed package can be run later without the catalog
+ENTRY_FILE = "install_entry.json"
+
+
+def _save_entry(d: Path, entry: dict, log: Callable[[str], None]) -> None:
+    try:
+        (d / ENTRY_FILE).write_text(json.dumps(entry, indent=1))
+    except (OSError, TypeError) as e:
+        log(f"Could not save the install entry: {e}")
+
+
+def installed_entry(pkg_name: str, version: str) -> dict:
+    """The install entry of an installed (package, version), read from its
+    env folder (no network). Envs installed before entries were saved are
+    recognised from their import check (run without ``--frozen``)."""
+    if not is_installed(pkg_name, version):
+        raise FileNotFoundError(f"{pkg_name} {version} is not installed")
+    d = env_dir(pkg_name, version)
+    try:
+        return json.loads((d / ENTRY_FILE).read_text())
+    except (OSError, ValueError):
+        pass
+    candidates = [d / "pixi.toml"]
+    for project in sorted((d / SOURCE_SUBDIR).glob("*")):
+        candidates += [project / "pixi.toml", project / "pyproject.toml"]
+    for manifest in candidates:
+        prefix = manifest.parent / ".pixi" / "envs" / "default"
+        record = env_cache.load_check(prefix) if manifest.exists() else None
+        if record and record.get("ok") and record.get("pkg_dir"):
+            pkg_dir = record["pkg_dir"]
+            return {
+                "src_path": pkg_dir,
+                "manifest_path": os.path.join(pkg_dir, "__FRACTAL_MANIFEST__.json"),
+                "pixi_manifest_path": str(manifest),
+                "pixi_frozen": False,
+                "version": version,
+            }
+    raise FileNotFoundError(
+        f"{pkg_name} {version}: cannot find the installed package; "
+        "install it again")
 
 
 def is_installed(pkg_name: str, version: str) -> bool:

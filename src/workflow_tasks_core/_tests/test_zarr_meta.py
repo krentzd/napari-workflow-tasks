@@ -28,3 +28,23 @@ def test_v05(tmp_path):
 def test_no_metadata(tmp_path):
     assert list_labels(str(tmp_path)) == []
     assert channel_labels(str(tmp_path)) == []
+
+
+def test_list_tables_v04_and_v05(tmp_path):
+    from workflow_tasks_core.zarr_meta import list_tables
+
+    v04 = tmp_path / "a"
+    (v04 / "tables").mkdir(parents=True)
+    (v04 / "tables" / ".zattrs").write_text(json.dumps({"tables": ["FOV_ROI_table"]}))
+    v05 = tmp_path / "b"
+    (v05 / "tables").mkdir(parents=True)
+    (v05 / "tables" / "zarr.json").write_text(
+        json.dumps({"attributes": {"tables": ["nuclei_ROI_table"]}}))
+    v05_ome = tmp_path / "c"
+    (v05_ome / "tables").mkdir(parents=True)
+    (v05_ome / "tables" / "zarr.json").write_text(
+        json.dumps({"attributes": {"ome": {"tables": ["t"]}}}))
+    assert list_tables(str(v04)) == ["FOV_ROI_table"]
+    assert list_tables(str(v05)) == ["nuclei_ROI_table"]
+    assert list_tables(str(v05_ome)) == ["t"]
+    assert list_tables(str(tmp_path / "none")) == []
