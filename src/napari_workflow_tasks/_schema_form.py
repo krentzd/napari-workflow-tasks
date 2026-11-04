@@ -11,7 +11,7 @@ Schema                         Widget
 ``integer`` / ``number``       spin box (respects minimum/maximum)
 ``boolean``                    check box
 ``string``                     line edit (with suggestions, e.g. channels)
-``array`` of scalars           line edit, comma separated
+``array`` of scalars           line edit, comma separated (or a JSON list)
 ``$ref`` / object              collapsible group with a nested form
 ``anyOf: [X, null]``           "set" check box enabling X (None if off)
 ``oneOf`` / ``anyOf`` (models)  type drop-down + the selected model's form
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import Any, Optional
 
 from qtpy.QtCore import Qt, Signal
@@ -123,6 +124,9 @@ class Field(QWidget):
         self.schema = schema
         self.path = path
         self.required = required
+        # What an empty simple field returns: _NO_VALUE (omit the argument),
+        # or None for a required argument that accepts null
+        self.empty_value = _NO_VALUE
 
     # value returned to the task, or _NO_VALUE
     def value(self) -> Any:
@@ -298,7 +302,7 @@ class NumberField(Field):
             return int(v) if self.is_int else float(v)
         text = self.edit.text().strip()
         if not text:
-            return _NO_VALUE
+            return self.empty_value
         try:
             return int(text) if self.is_int else float(text)
         except ValueError as e:
@@ -332,7 +336,7 @@ class StringField(Field):
     def value(self):
         text = self.edit.text()
         if text == "" and "default" not in self.schema:
-            return _NO_VALUE
+            return self.empty_value
         return text
 
     def set_value(self, value):
@@ -340,13 +344,20 @@ class StringField(Field):
 
 
 class ListField(Field):
-    """Array of scalars as a comma-separated line edit."""
+    """Array of scalars as a comma-separated line edit.
+
+    Text starting with ``[`` is parsed as a JSON list, so string items may
+    contain commas (e.g. ``["a, b", "c"]``). For string items, JSON objects
+    in that list (or text starting with ``{``) are sent as their JSON text,
+    e.g. ROIs given as JSON strings."""
 
     def __init__(self, schema, path, required, defs, parent=None, suggestions=None):
         super().__init__(schema, path, required, parent)
-        self.item_type = _type(resolve(schema.get("items", {}), defs)) or "string"
+        item = resolve(schema.get("items", {}), defs)
+        self.item_type = _type(item) or "string"
+        self.item_pattern = item.get("pattern")
         self.edit = QLineEdit()
-        hint = "comma separated"
+        hint = "comma separated" if not self.item_pattern else "JSON list or comma separated"
         if suggestions:
             hint += f", e.g. {', '.join(list(suggestions)[:3])}"
             completer = QCompleter(list(suggestions))
@@ -368,14 +379,60 @@ class ListField(Field):
             return text.lower() in ("1", "true", "yes")
         return text
 
+    _JSON_TYPES = {
+        "integer": (int,), "number": (int, float), "boolean": (bool,), "string": (str,),
+    }
+
+    def _parse_json(self, text):
+        if text.startswith("{"):
+            text = f"[{text}]"  # one or more JSON objects, comma separated
+        try:
+            items = json.loads(text)
+        except ValueError as e:
+            raise SchemaError(self.path, f"invalid JSON list ({e.args[0]})") from e
+        if not isinstance(items, list):
+            raise SchemaError(self.path, "expected a JSON list")
+        out = []
+        for x in items:
+            if self.item_type == "string" and isinstance(x, (dict, list)):
+                x = json.dumps(x)
+            ok = isinstance(x, self._JSON_TYPES.get(self.item_type, (object,)))
+            if not ok or (isinstance(x, bool) and self.item_type != "boolean"):
+                raise SchemaError(
+                    self.path, f"invalid list item {x!r} (expected {self.item_type})"
+                )
+            if self.item_type == "number":
+                x = float(x)
+            out.append(x)
+        return out
+
     def value(self):
         text = self.edit.text().strip()
         if not text:
-            return [] if "default" in self.schema else _NO_VALUE
-        try:
-            items = [self._convert(x.strip()) for x in text.split(",") if x.strip()]
-        except ValueError as e:
-            raise SchemaError(self.path, f"invalid list item ({e})") from e
+            if "default" not in self.schema:
+                return self.empty_value
+            items = []
+        elif text.startswith("[") or (
+            self.item_type == "string" and text.startswith("{")
+        ):
+            items = self._parse_json(text)
+        else:
+            try:
+                items = [
+                    self._convert(x.strip()) for x in text.split(",") if x.strip()
+                ]
+            except ValueError as e:
+                raise SchemaError(self.path, f"invalid list item ({e})") from e
+        if self.item_pattern:
+            for x in items:
+                try:
+                    ok = not isinstance(x, str) or re.search(self.item_pattern, x)
+                except re.error:
+                    ok = True  # pattern not understood by Python: let the task check
+                if not ok:
+                    raise SchemaError(
+                        self.path, f"item {x!r} does not match the pattern {self.item_pattern}"
+                    )
         lo, hi = self.schema.get("minItems"), self.schema.get("maxItems")
         if lo is not None and len(items) < lo:
             raise SchemaError(self.path, f"needs at least {lo} item(s)")
@@ -384,8 +441,18 @@ class ListField(Field):
         return items
 
     def set_value(self, value):
-        if isinstance(value, list):
-            self.edit.setText(", ".join(str(v) for v in value))
+        if value is None:
+            self.edit.setText("")
+        elif isinstance(value, list):
+            needs_json = any(
+                not isinstance(v, (str, int, float))
+                or (isinstance(v, str) and ("," in v or v != v.strip() or v[:1] in "[{"))
+                for v in value
+            )
+            if needs_json:
+                self.edit.setText(json.dumps(value))
+            else:
+                self.edit.setText(", ".join(str(v) for v in value))
 
 
 class JsonField(Field):
@@ -566,10 +633,15 @@ class MapField(_RowsField):
 
 
 class ObjectField(Field):
-    """Nested model: a sub-form."""
+    """Nested model: a sub-form.
+
+    An optional model without a default (``Optional[Model] = None``, written
+    as ``allOf: [$ref]`` by fractal-task-tools) is left out while its form is
+    untouched; its required fields are only checked once something is set."""
 
     def __init__(self, schema, path, required, defs, parent=None, suggestions=None):
         super().__init__(schema, path, required, parent)
+        self.optional = not required and "default" not in schema
         self.form = _FormBody(
             schema.get("properties", {}),
             set(schema.get("required", [])),
@@ -583,11 +655,18 @@ class ObjectField(Field):
         lay.addWidget(self.form)
         self.reset()
 
+    def _unset(self) -> bool:
+        return self.optional and self.form.is_pristine()
+
     def value(self):
+        if self._unset():
+            return _NO_VALUE
         return self.form.values(omit_defaults=False)
 
     def set_value(self, value):
-        if isinstance(value, dict):
+        if value is None and self.optional:
+            self.form.reset()
+        elif isinstance(value, dict):
             self.form.set_values(value)
 
     def reset(self):
@@ -595,6 +674,9 @@ class ObjectField(Field):
         super().reset()
 
     def validate(self):
+        if self._unset():
+            self.form.clear_marks()
+            return []
         return self.form.validate()
 
 
@@ -703,6 +785,14 @@ class UnionField(Field):
         return self.fields[self.combo.currentIndex()].validate()
 
 
+def _nullable(field: Field, nullable: bool) -> Field:
+    """``type: [X, "null"]``: an empty required field is sent as null."""
+    if nullable and field.required and "default" not in field.schema:
+        field.required = False
+        field.empty_value = None
+    return field
+
+
 def build_field(
     schema: dict,
     defs: dict,
@@ -732,6 +822,9 @@ def build_field(
                 inner, "use_spin", False
             ):
                 inner.required = False
+                if required and "default" not in schema:
+                    # Required but nullable: empty is sent as null
+                    inner.empty_value = None
                 inner.schema = {k: v for k, v in inner.schema.items() if k != "default"}
                 if schema.get("default") is None:
                     inner.set_value(None)
@@ -747,16 +840,19 @@ def build_field(
         return EnumField(schema, path, required)
 
     t = _type(schema)
+    nullable = isinstance(schema.get("type"), list) and "null" in schema["type"]
     if t == "boolean":
         return BoolField(schema, path, required)
     if t in ("integer", "number"):
-        return NumberField(schema, path, required)
+        return _nullable(NumberField(schema, path, required), nullable)
     if t == "string":
-        return StringField(schema, path, required, suggestions=hints)
+        return _nullable(StringField(schema, path, required, suggestions=hints), nullable)
     if t == "array":
         item = resolve(schema.get("items", {}), defs)
         if _type(item) in ("string", "integer", "number", "boolean") and not _variants(item):
-            return ListField(schema, path, required, defs, suggestions=hints)
+            return _nullable(
+                ListField(schema, path, required, defs, suggestions=hints), nullable
+            )
         if item.get("properties") or _variants(item):
             return ModelListField(schema, path, required, defs, suggestions=suggestions)
         return JsonField(schema, path, required)
@@ -818,6 +914,7 @@ class _FormBody(QWidget):
         super().__init__()
         self.fields: dict[str, Field] = {}
         self.schemas: dict[str, dict] = {}
+        self.required = set(required)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -895,7 +992,11 @@ class _FormBody(QWidget):
             if omit_defaults:
                 if "default" in self.schemas[key] and v == self.schemas[key]["default"]:
                     continue
-                if not field.required and v == self._pristine.get(key, _NO_VALUE):
+                if (
+                    key not in self.required
+                    and not field.required
+                    and v == self._pristine.get(key, _NO_VALUE)
+                ):
                     continue
             out[key] = v
         return out
@@ -904,6 +1005,16 @@ class _FormBody(QWidget):
         for key, v in values.items():
             if key in self.fields:
                 self.fields[key].set_value(v)
+
+    def is_pristine(self) -> bool:
+        """True while every field still has the value it had when built."""
+        return self._safe_values() == self._pristine
+
+    def clear_marks(self) -> None:
+        for f in self.fields.values():
+            f._mark(False)
+            if isinstance(f, ObjectField):
+                f.form.clear_marks()
 
     def reset(self):
         for f in self.fields.values():

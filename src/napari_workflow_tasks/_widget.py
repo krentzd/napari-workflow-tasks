@@ -174,15 +174,21 @@ def _channel_labels(zarr_url):
 
 
 def _prefill_channel(fields, layer_name, channels):
-    """Fill empty, required channel-identifier lists with the input layer's
-    channel (napari-ome-zarr names image layers after their channel)."""
+    """Fill empty channel-identifier lists that need a value (required, or
+    with ``minItems``) with the input layer's channel (napari-ome-zarr names
+    image layers after their channel). Optional nested models are left
+    untouched: prefilling would make the form send them."""
     if not layer_name or layer_name not in channels:
         return
     for key, field in fields.items():
         inner = getattr(field, 'form', None)
         if inner is not None:
-            _prefill_channel(inner.fields, layer_name, channels)
-        elif key == 'identifiers' and isinstance(field, ListField) and field.required:
+            if not getattr(field, 'optional', False):
+                _prefill_channel(inner.fields, layer_name, channels)
+        elif (
+            key == 'identifiers' and isinstance(field, ListField)
+            and (field.required or field.schema.get('minItems'))
+        ):
             if not field.edit.text().strip():
                 field.set_value([layer_name])
 

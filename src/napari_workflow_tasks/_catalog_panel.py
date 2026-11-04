@@ -42,6 +42,17 @@ class _LogEmitter(QObject):
     line = Signal(str)
 
 
+PINS_TOOLTIP = (
+    "Extra version constraints for this task's environment, comma "
+    "separated. Pinned versions always win. Re-install to apply."
+)
+PINS_LOCK_TOOLTIP = (
+    "This release ships a pixi.lock: it is used as is if it satisfies the "
+    "pins, otherwise the package's pixi config is re-solved with them "
+    "(or its wheel is installed with them)."
+)
+
+
 class CatalogPanel(QGroupBox):
     """
     Emits ``installed(pkg, version, info, entry, task_name)`` once a package
@@ -117,10 +128,7 @@ class CatalogPanel(QGroupBox):
         pins_row.layout().addWidget(QLabel("Pinned packages:"))
         self.pins_edit = QLineEdit()
         self.pins_edit.setPlaceholderText("e.g. cellpose<4.2, numpy==1.26.4")
-        self.pins_edit.setToolTip(
-            "Extra version constraints for this task's environment, "
-            "comma separated. Re-install to apply."
-        )
+        self.pins_edit.setToolTip(PINS_TOOLTIP)
         pins_row.layout().addWidget(self.pins_edit)
         layout.addWidget(pins_row)
 
@@ -129,9 +137,13 @@ class CatalogPanel(QGroupBox):
         self.lock_check.setToolTip(
             "Install the exact dependency versions the task authors locked and "
             "tested (like fractal-server's pixi task collection). "
-            "pip extras and pinned packages are then ignored. Falls back to "
-            "resolving dependencies if the release has no pixi.lock or it "
-            "does not cover this platform."
+            "pip extras are not used for that install. Pinned packages win: "
+            "the lock is used only if it satisfies them, otherwise the "
+            "package's pixi config is re-solved with the pins. "
+            "Falls back to resolving dependencies (the package's pixi config, "
+            "then its wheel, with your extras and pins) if the release has no "
+            "pixi.lock, or it does not cover this platform or the pins, fails "
+            "to install or its tasks can't be imported."
         )
         self.lock_check.toggled.connect(self._update_lock_hint)
         layout.addWidget(self.lock_check)
@@ -379,14 +391,15 @@ class CatalogPanel(QGroupBox):
         self.pins_edit.setText(
             ", ".join(catalog.SUGGESTED_PINS.get(pkg_name, []))
         )
+        self._extras_tip = (
+            "Available extras: " + (", ".join(info.extras) or "none")
+            if info else ""
+        )
         self._update_lock_hint()
-        if info:
-            self.extras_edit.setToolTip(
-                "Available extras: " + (", ".join(info.extras) or "none")
-            )
 
     def _update_lock_hint(self, *_):
-        """Grey out extras/pins when they won't be used (locked release)."""
+        """Grey out extras when they won't be used (locked release). Pins
+        are always used: they decide whether the lock can be used."""
         sel = self._selected()
         locked = False
         if sel is not None and sel[1] in self._packages:
@@ -396,12 +409,18 @@ class CatalogPanel(QGroupBox):
             except KeyError:
                 locked = False
         use = locked and self.lock_check.isChecked()
-        for w in (self.extras_edit, self.pins_edit):
-            w.setEnabled(not use)
-            w.setToolTip(
-                "Not used: this release is installed from its pixi.lock"
-                if use else ""
-            )
+        self.extras_edit.setEnabled(not use)
+        note = (
+            "Not used for the install from this release's pixi.lock; "
+            "used only if that falls back to resolving dependencies"
+            if use else ""
+        )
+        tip = getattr(self, "_extras_tip", "")
+        self.extras_edit.setToolTip("\n".join(t for t in (note, tip) if t))
+        self.pins_edit.setEnabled(True)
+        self.pins_edit.setToolTip(
+            PINS_TOOLTIP + (" " + PINS_LOCK_TOOLTIP if use else "")
+        )
 
     # ------------------------------------------------------------------
     # Installation
@@ -462,6 +481,9 @@ class CatalogPanel(QGroupBox):
             if idx >= 0 and "✓" not in combo.itemText(idx):
                 combo.setItemText(idx, combo.itemText(idx) + "  ✓")
         how = " from its pixi.lock" if entry.get("pixi_frozen") else ""
+        pins = entry.get("pins_applied")
+        if pins:
+            how += f" (pinned: {', '.join(pins['pins'])})"
         self.status.setText(f"Installed {pkg.pkg_name}=={version}{how}.")
         show_info(f"Installed {pkg.pkg_name}=={version}{how}")
         self.installed.emit(pkg, version, info, entry, task_name)
