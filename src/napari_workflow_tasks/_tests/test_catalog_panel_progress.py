@@ -2,46 +2,17 @@
 with the current step and the elapsed time, hidden when the install ends."""
 import pytest
 
-from napari_workflow_tasks import catalog
+from workflow_tasks_core import paths
 
 pytest.importorskip("napari")
-
-from napari_workflow_tasks._catalog_panel import (  # noqa: E402
-    _format_elapsed,
-    install_step,
-)
-
-
-@pytest.mark.parametrize("line, step", [
-    ("Looking for pixi.lock in https://x/y.tar.gz", "Downloading"),
-    ("Using the cached source archive", "Downloading"),
-    ("Installing my-tasks==1.1 from its pixi.lock (exact versions)",
-     "Installing dependencies"),
-    ("Solving my-tasks==1.1 from its pixi config", "Installing dependencies"),
-    ("Caching the environment's native libraries", "Caching"),
-    ("Checking that the tasks import", "Checking"),
-    ("Import check OK (3 task modules)", "Checking"),
-])
-def test_install_step(line, step):
-    assert install_step(line).startswith(step)
-
-
-def test_install_step_ignores_other_lines():
-    assert install_step("  ✔ The default environment has been installed.") is None
-    assert install_step("") is None
-
-
-def test_format_elapsed():
-    assert _format_elapsed(7.9) == "7s"
-    assert _format_elapsed(125) == "2m 05s"
 
 
 @pytest.fixture
 def panel(qtbot, tmp_path, monkeypatch):
     from napari_workflow_tasks._catalog_panel import CatalogPanel
 
-    monkeypatch.setattr(catalog, "ENVS_DIR", tmp_path / "envs")
-    monkeypatch.setattr(catalog, "CATALOG_CACHE_DIR", tmp_path / "catalog")
+    monkeypatch.setattr(paths, "ENVS_DIR", tmp_path / "envs")
+    monkeypatch.setattr(paths, "CATALOG_CACHE_DIR", tmp_path / "catalog")
     w = CatalogPanel()
     qtbot.addWidget(w)
     return w

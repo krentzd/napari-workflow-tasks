@@ -1,15 +1,16 @@
-"""Tests for the install caches (_env_cache) and their use in
-catalog.install_version: native-library store, install recipes, import-check
+"""Tests for the install caches (env_cache) and their use in
+install.install_version: native-library store, install recipes, import-check
 cache, failed-install marker, no-build retry on the pixi-config path."""
 import errno
 import json
 import os
 import subprocess
+import tomllib
 
 import pytest
 
-from napari_workflow_tasks import _env_cache as ec
-from napari_workflow_tasks import catalog
+from workflow_tasks_core import env_cache as ec
+from workflow_tasks_core import install, manifests, paths, pixi_config, task_packages
 
 
 # --------------------------------------------------------------------------
@@ -127,17 +128,17 @@ def test_prune_store(tmp_path):
 
 
 def test_delete_env_prunes(tmp_path, monkeypatch):
-    monkeypatch.setattr(catalog, "ENVS_DIR", tmp_path / "envs")
-    monkeypatch.setattr(catalog, "CACHE_DIR", tmp_path / "cache")
-    env = catalog.env_dir("p", "1") / ".pixi" / "envs" / "default"
+    monkeypatch.setattr(paths, "ENVS_DIR", tmp_path / "envs")
+    monkeypatch.setattr(paths, "CACHE_DIR", tmp_path / "cache")
+    env = paths.env_dir("p", "1") / ".pixi" / "envs" / "default"
     _env(env, {"lib/libx.dylib": b"x"})
-    ec.dedup_tree(env, catalog.native_store_dir())
-    assert len(list(catalog.native_store_dir().iterdir())) == 1
+    ec.dedup_tree(env, paths.native_store_dir())
+    assert len(list(paths.native_store_dir().iterdir())) == 1
     # default: recently orphaned libraries are kept for a fast re-install
-    assert catalog.delete_env("p", "1")["removed"] == 0
-    assert not catalog.env_dir("p", "1").exists()
-    assert catalog.prune_native_store(unused_for=3600)["removed"] == 0
-    assert catalog.prune_native_store()["removed"] == 1
+    assert install.delete_env("p", "1")["removed"] == 0
+    assert not paths.env_dir("p", "1").exists()
+    assert install.prune_native_store(unused_for=3600)["removed"] == 0
+    assert install.prune_native_store()["removed"] == 1
 
 
 # --------------------------------------------------------------------------
@@ -157,9 +158,9 @@ def test_recipe_key_stable():
 
 
 def test_install_recipe_key_inputs(monkeypatch):
-    monkeypatch.setattr(catalog, "pixi_version", lambda pixi: "pixi 0.83.0")
+    monkeypatch.setattr(pixi_config, "pixi_version", lambda pixi: "pixi 0.83.0")
     pkg = _pkg()
-    key = lambda **kw: catalog.install_recipe_key(  # noqa: E731
+    key = lambda **kw: install.install_recipe_key(  # noqa: E731
         pkg, "1.0", kw.get("extras", []), kw.get("pins"),
         kw.get("sysreqs", {"macos": "26.7.1"}), "pixi")
     base = key()
@@ -169,9 +170,9 @@ def test_install_recipe_key_inputs(monkeypatch):
     assert key(pins=["numpy<2"]) != base
     assert key(extras=["gpu"]) != base
     assert key(sysreqs={"macos": "13.0"}) != base
-    monkeypatch.setattr(catalog, "pixi_version", lambda pixi: "pixi 0.84.0")
+    monkeypatch.setattr(pixi_config, "pixi_version", lambda pixi: "pixi 0.84.0")
     assert key() != base
-    monkeypatch.setattr(catalog, "current_pixi_platform", lambda: "linux-64")
+    monkeypatch.setattr(pixi_config, "current_pixi_platform", lambda: "linux-64")
     assert key() != base
 
 
@@ -210,11 +211,11 @@ def test_recipes_disabled(tmp_path, monkeypatch):
 
 
 def _pkg(source_url=None):
-    return catalog.TaskPackage(
+    return task_packages.TaskPackage(
         "https://pypi.org/project/my-tasks", "pypi", "my-tasks",
-        [catalog.PackageVersion("1.0", "https://x/my_tasks-1.0-py3-none-any.whl",
-                                "my_tasks-1.0-py3-none-any.whl", ">=3.11",
-                                source_url=source_url)],
+        [task_packages.PackageVersion("1.0", "https://x/my_tasks-1.0-py3-none-any.whl",
+                                      "my_tasks-1.0-py3-none-any.whl", ">=3.11",
+                                      source_url=source_url)],
     )
 
 
@@ -278,93 +279,93 @@ class FakePixi:
 
 @pytest.fixture
 def fake(tmp_path, monkeypatch):
-    monkeypatch.setattr(catalog, "CATALOG_CACHE_DIR", tmp_path / "catalog")
-    monkeypatch.setattr(catalog, "ENVS_DIR", tmp_path / "envs")
-    monkeypatch.setattr(catalog, "CACHE_DIR", tmp_path / "cache")
-    info = catalog.VersionInfo(
+    monkeypatch.setattr(paths, "CATALOG_CACHE_DIR", tmp_path / "catalog")
+    monkeypatch.setattr(paths, "ENVS_DIR", tmp_path / "envs")
+    monkeypatch.setattr(paths, "CACHE_DIR", tmp_path / "cache")
+    info = manifests.VersionInfo(
         {"task_list": [{"name": "T", "executable_parallel": "t.py"}]},
         "my_tasks", "my_tasks/__FRACTAL_MANIFEST__.json", [], ">=3.11")
-    monkeypatch.setattr(catalog, "get_version_info", lambda p, v: info)
-    monkeypatch.setattr(catalog, "find_pixi", lambda: "pixi")
-    monkeypatch.setattr(catalog, "pixi_version", lambda pixi: "pixi 0.83.0")
-    monkeypatch.setattr(catalog, "host_system_requirements",
+    monkeypatch.setattr(manifests, "get_version_info", lambda p, v: info)
+    monkeypatch.setattr(pixi_config, "find_pixi", lambda: "pixi")
+    monkeypatch.setattr(pixi_config, "pixi_version", lambda pixi: "pixi 0.83.0")
+    monkeypatch.setattr(pixi_config, "host_system_requirements",
                         lambda log=None: {"macos": "26.7.1"})
     # `pixi list` (pins): nothing locked / installed unless a test says so
-    monkeypatch.setattr(catalog, "_locked_versions", lambda pixi, m: {})
-    monkeypatch.setattr(catalog, "lock_package_versions",
+    monkeypatch.setattr(pixi_config, "locked_versions", lambda pixi, m: {})
+    monkeypatch.setattr(pixi_config, "lock_package_versions",
                         lambda pixi, m, name, environment="default": None)
     f = FakePixi(tmp_path)
-    monkeypatch.setattr(catalog, "_run_streaming", f)
+    monkeypatch.setattr(install, "_run_streaming", f)
     return f
 
 
 def test_recipe_reused_and_check_cached(fake):
     pkg, msgs = _pkg(), []
-    e1 = catalog.install_version(pkg, "1.0", log=msgs.append)
+    e1 = install.install_version(pkg, "1.0", log=msgs.append)
     assert e1["env_kind"] == "resolved" and "from_recipe" not in e1
     assert e1["pixi_frozen"] is False
     assert len(fake.installs) == 1 and len(fake.checks) == 1
     recipe = json.loads(
-        (catalog.recipes_dir() / f"{e1['recipe_key']}.json").read_text())
+        (paths.recipes_dir() / f"{e1['recipe_key']}.json").read_text())
     assert recipe["env_kind"] == "resolved" and recipe["python"] == "3.12"
     assert recipe["check"]["ok"] and recipe["check"]["modules"] == ["my_tasks", "t.py"]
-    assert catalog.is_installed("my-tasks", "1.0")
+    assert install.is_installed("my-tasks", "1.0")
     # the native lib went into the store
-    assert len(list(catalog.native_store_dir().iterdir())) == 1
+    assert len(list(paths.native_store_dir().iterdir())) == 1
 
     # S2: env present -> recipe, --frozen, no import check
-    e2 = catalog.install_version(pkg, "1.0", log=msgs.append)
+    e2 = install.install_version(pkg, "1.0", log=msgs.append)
     assert e2["from_recipe"] and e2["src_path"] == e1["src_path"]
     assert "--frozen" in fake.installs[-1]
     assert len(fake.checks) == 1
     assert any("Import check skipped" in m for m in msgs)
 
     # S3: env deleted -> recipe (frozen), store relinks, check runs again
-    catalog.delete_env("my-tasks", "1.0")
-    assert not catalog.is_installed("my-tasks", "1.0")
+    install.delete_env("my-tasks", "1.0")
+    assert not install.is_installed("my-tasks", "1.0")
     msgs.clear()
-    e3 = catalog.install_version(pkg, "1.0", log=msgs.append)
+    e3 = install.install_version(pkg, "1.0", log=msgs.append)
     assert e3["from_recipe"] and "--frozen" in fake.installs[-1]
     assert len(fake.checks) == 2
     assert any("1 linked to the cache" in m for m in msgs)
-    lock = catalog.env_dir("my-tasks", "1.0") / "pixi.lock"
+    lock = paths.env_dir("my-tasks", "1.0") / "pixi.lock"
     assert lock.read_text() == recipe["lock_text"]
 
 
 def test_recheck_when_env_changes(fake):
     pkg = _pkg()
-    catalog.install_version(pkg, "1.0", log=lambda m: None)
-    prefix = catalog.env_dir("my-tasks", "1.0") / ".pixi" / "envs" / "default"
+    install.install_version(pkg, "1.0", log=lambda m: None)
+    prefix = paths.env_dir("my-tasks", "1.0") / ".pixi" / "envs" / "default"
     (prefix / "conda-meta" / "numpy-2.0.json").write_text("{}")  # env changed
-    catalog.install_version(pkg, "1.0", log=lambda m: None)
+    install.install_version(pkg, "1.0", log=lambda m: None)
     assert len(fake.checks) == 2
 
 
 def test_changed_pins_new_recipe(fake):
     pkg = _pkg()
-    e1 = catalog.install_version(pkg, "1.0", log=lambda m: None)
-    e2 = catalog.install_version(pkg, "1.0", log=lambda m: None, pins=["numpy<2"])
+    e1 = install.install_version(pkg, "1.0", log=lambda m: None)
+    e2 = install.install_version(pkg, "1.0", log=lambda m: None, pins=["numpy<2"])
     assert e2["recipe_key"] != e1["recipe_key"] and "from_recipe" not in e2
     assert "--frozen" not in fake.installs[-1]  # full flow (solve)
-    assert len(list(catalog.recipes_dir().glob("*.json"))) == 2
+    assert len(list(paths.recipes_dir().glob("*.json"))) == 2
     assert e1["pins_applied"] is None
     assert e2["pins_applied"]["pins"] == ["numpy<2"]
     assert "generated pixi.toml" in e2["pins_applied"]["how"]
     # the recipe keeps how the pins were applied
-    e3 = catalog.install_version(pkg, "1.0", log=lambda m: None, pins=["numpy<2"])
+    e3 = install.install_version(pkg, "1.0", log=lambda m: None, pins=["numpy<2"])
     assert e3["from_recipe"] and e3["pins_applied"]["how"] == e2["pins_applied"]["how"]
 
 
 def test_failed_frozen_install_drops_recipe(fake):
     pkg, msgs = _pkg(), []
-    e1 = catalog.install_version(pkg, "1.0", log=msgs.append)
+    e1 = install.install_version(pkg, "1.0", log=msgs.append)
     fake.fail_install = lambda cmd: "lock broken" if "--frozen" in cmd else None
-    e2 = catalog.install_version(pkg, "1.0", log=msgs.append)
+    e2 = install.install_version(pkg, "1.0", log=msgs.append)
     assert "from_recipe" not in e2
     assert any("Install from the cached recipe failed" in m for m in msgs)
     # full flow succeeded and saved a fresh recipe under the same key
     assert e2["recipe_key"] == e1["recipe_key"]
-    assert (catalog.recipes_dir() / f"{e1['recipe_key']}.json").exists()
+    assert (paths.recipes_dir() / f"{e1['recipe_key']}.json").exists()
 
 
 def test_unreadable_recipe_lock_recovers(fake):
@@ -372,16 +373,16 @@ def test_unreadable_recipe_lock_recovers(fake):
     frozen install fails, the recipe is dropped and the full flow must not
     start from the restored bad lock."""
     pkg, msgs = _pkg(), []
-    e1 = catalog.install_version(pkg, "1.0", log=msgs.append)
-    path = catalog.recipes_dir() / f"{e1['recipe_key']}.json"
+    e1 = install.install_version(pkg, "1.0", log=msgs.append)
+    path = paths.recipes_dir() / f"{e1['recipe_key']}.json"
     r = json.loads(path.read_text())
     r["lock_text"] = "version: 6\nenvironments: [broken\n"
     r["lock_sha256"] = ec.text_sha256(r["lock_text"])
     path.write_text(json.dumps(r))
-    e2 = catalog.install_version(pkg, "1.0", log=msgs.append)
+    e2 = install.install_version(pkg, "1.0", log=msgs.append)
     assert "from_recipe" not in e2
     assert any("cached recipe failed" in m for m in msgs)
-    lock = catalog.env_dir("my-tasks", "1.0") / "pixi.lock"
+    lock = paths.env_dir("my-tasks", "1.0") / "pixi.lock"
     assert "broken" not in lock.read_text()
     assert "broken" not in json.loads(path.read_text())["lock_text"]
 
@@ -389,22 +390,22 @@ def test_unreadable_recipe_lock_recovers(fake):
 def test_failed_check_not_installed(fake):
     fake.fail_check = True
     with pytest.raises(RuntimeError, match="can't be imported"):
-        catalog.install_version(_pkg(), "1.0", log=lambda m: None)
-    d = catalog.env_dir("my-tasks", "1.0")
+        install.install_version(_pkg(), "1.0", log=lambda m: None)
+    d = paths.env_dir("my-tasks", "1.0")
     assert (d / ".pixi" / "envs").exists()  # kept for debugging
-    assert (d / catalog.INCOMPLETE_MARKER).exists()
-    assert not catalog.is_installed("my-tasks", "1.0")
-    assert not list(catalog.recipes_dir().glob("*.json"))
+    assert (d / install.INCOMPLETE_MARKER).exists()
+    assert not install.is_installed("my-tasks", "1.0")
+    assert not list(paths.recipes_dir().glob("*.json"))
     fake.fail_check = False
-    catalog.install_version(_pkg(), "1.0", log=lambda m: None)
-    assert catalog.is_installed("my-tasks", "1.0")
+    install.install_version(_pkg(), "1.0", log=lambda m: None)
+    assert install.is_installed("my-tasks", "1.0")
 
 
 def test_dedup_off_still_installs(fake, monkeypatch):
     monkeypatch.setenv(ec.DEDUP_ENV_VAR, "0")
-    catalog.install_version(_pkg(), "1.0", log=lambda m: None)
-    assert not catalog.native_store_dir().exists()
-    assert catalog.is_installed("my-tasks", "1.0")
+    install.install_version(_pkg(), "1.0", log=lambda m: None)
+    assert not paths.native_store_dir().exists()
+    assert install.is_installed("my-tasks", "1.0")
 
 
 def test_exdev_install_still_succeeds(fake, monkeypatch):
@@ -413,7 +414,7 @@ def test_exdev_install_still_succeeds(fake, monkeypatch):
 
     monkeypatch.setattr(ec.os, "link", no_link)
     msgs = []
-    entry = catalog.install_version(_pkg(), "1.0", log=msgs.append)
+    entry = install.install_version(_pkg(), "1.0", log=msgs.append)
     assert entry["src_path"]
     assert any("dedup skipped" in m and "EXDEV" in m for m in msgs)
 
@@ -446,7 +447,7 @@ def project_pkg(fake, tmp_path, monkeypatch):
     src = tmp_path / "sdist" / "my_tasks-1.0"
     src.mkdir(parents=True)
     (src / "pyproject.toml").write_text(
-        PYPROJECT.format(plat=catalog.current_pixi_platform()))
+        PYPROJECT.format(plat=pixi_config.current_pixi_platform()))
     # the lock does not cover this platform: (a) is skipped, (b) re-solves
     (src / "pixi.lock").write_text(
         "version: 6\nenvironments:\n  default:\n    packages:\n      some-os:\n"
@@ -460,7 +461,7 @@ def project_pkg(fake, tmp_path, monkeypatch):
         downloads.append(url)
         return archive.read_bytes()
 
-    monkeypatch.setattr(catalog, "_http_get", fake_http_get)
+    monkeypatch.setattr(task_packages, "http_get", fake_http_get)
 
     def fail(cmd):
         manifest = cmd[cmd.index("--manifest-path") + 1]
@@ -482,7 +483,7 @@ def test_pixi_config_no_build_retry(fake, project_pkg):
     import tomllib
 
     msgs = []
-    entry = catalog.install_version(_pkg(SRC_URL), "1.0", log=msgs.append)
+    entry = install.install_version(_pkg(SRC_URL), "1.0", log=msgs.append)
     assert entry["env_kind"] == "pixi config" and entry["pixi_frozen"] is False
     manifest = entry["pixi_manifest_path"]
     cfg = tomllib.loads(open(manifest).read())["tool"]["pixi"]
@@ -490,21 +491,21 @@ def test_pixi_config_no_build_retry(fake, project_pkg):
     assert cfg["pypi-options"]["no-build"] == ["pyqt6", "pyqt6-qt6"]
     assert cfg["pypi-options"]["index-url"] == "https://pypi.org/simple"
     # host requirements on the platform entry (no deprecated table)
-    plat = catalog.current_pixi_platform()
+    plat = pixi_config.current_pixi_platform()
     assert cfg["workspace"]["platforms"] == [
-        catalog.host_platform_entry(plat, {"macos": "26.7.1"})]
+        pixi_config.host_platform_entry(plat, {"macos": "26.7.1"})]
     assert "system-requirements" not in cfg
     assert len(fake.installs) == 3
     recipe = json.loads(
-        (catalog.recipes_dir() / f"{entry['recipe_key']}.json").read_text())
+        (paths.recipes_dir() / f"{entry['recipe_key']}.json").read_text())
     assert recipe["no_build"] == ["pyqt6", "pyqt6-qt6"]
     assert recipe["manifest_relpath"] == "source/my_tasks-1.0/pyproject.toml"
     assert recipe["source_url"] == SRC_URL
 
     # Env and project deleted: restored from the recipe + cached sdist,
     # one frozen install, no download
-    catalog.delete_env("my-tasks", "1.0")
-    e2 = catalog.install_version(_pkg(SRC_URL), "1.0", log=msgs.append)
+    install.delete_env("my-tasks", "1.0")
+    e2 = install.install_version(_pkg(SRC_URL), "1.0", log=msgs.append)
     assert e2["from_recipe"] and e2["env_kind"] == "pixi config"
     assert "--frozen" in fake.installs[-1] and len(fake.installs) == 4
     assert len(project_pkg) == 1  # source archive downloaded once (cached)
@@ -514,17 +515,17 @@ def test_pixi_config_no_build_retry(fake, project_pkg):
 def test_no_build_retry_gives_up_without_names(fake):
     fake.fail_install = lambda cmd: "No module named 'pkg_resources'"
     with pytest.raises(RuntimeError, match="every allowed Python"):
-        catalog.install_version(_pkg(), "1.0", log=lambda m: None)
+        install.install_version(_pkg(), "1.0", log=lambda m: None)
     # one attempt per Python, no no-build retries
-    assert len(fake.installs) == len(catalog.candidate_pythons(">=3.11"))
+    assert len(fake.installs) == len(pixi_config.candidate_pythons(">=3.11"))
 
 
 def test_pixi_version_real():
     try:
-        pixi = catalog.find_pixi()
+        pixi = pixi_config.find_pixi()
     except FileNotFoundError:
         pytest.skip("no pixi")
-    assert "pixi" in catalog.pixi_version(pixi)
+    assert "pixi" in pixi_config.pixi_version(pixi)
     assert subprocess.run([pixi, "--version"], capture_output=True).returncode == 0
 
 
@@ -540,7 +541,7 @@ def locked_pkg(fake, tmp_path, monkeypatch):
 
     src = tmp_path / "sdist_a" / "my_tasks-1.0"
     src.mkdir(parents=True)
-    plat = catalog.current_pixi_platform()
+    plat = pixi_config.current_pixi_platform()
     (src / "pyproject.toml").write_text(PYPROJECT.format(plat=plat))
     (src / "pixi.lock").write_text(
         f"version: 6\nenvironments:\n  default:\n    packages:\n      {plat}:\n"
@@ -548,7 +549,7 @@ def locked_pkg(fake, tmp_path, monkeypatch):
     archive = tmp_path / "a.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
         tar.add(src, arcname="my_tasks-1.0")
-    monkeypatch.setattr(catalog, "_http_get",
+    monkeypatch.setattr(task_packages, "http_get",
                         lambda url, headers=None: archive.read_bytes())
     return fake
 
@@ -556,7 +557,7 @@ def locked_pkg(fake, tmp_path, monkeypatch):
 def _lock_has(monkeypatch, versions):
     """The release's pixi.lock (as `pixi list --frozen` reads it) has
     ``versions`` {name: (version, kind)}."""
-    monkeypatch.setattr(catalog, "lock_package_versions",
+    monkeypatch.setattr(pixi_config, "lock_package_versions",
                         lambda pixi, m, name, environment="default": versions)
 
 
@@ -568,10 +569,10 @@ def test_locked_install_pins_satisfied(locked_pkg, monkeypatch, tmp_path):
     """Pins the lock satisfies: (a) as is (extras still not used), pins
     verified on the installed env and reported."""
     _lock_has(monkeypatch, {"numpy": ("1.26.4", "pypi")})
-    monkeypatch.setattr(catalog, "_locked_versions",
+    monkeypatch.setattr(pixi_config, "locked_versions",
                         lambda pixi, m: {"numpy": "1.26.4"})
     msgs = []
-    e = catalog.install_version(_pkg(SRC_URL), "1.0", log=msgs.append,
+    e = install.install_version(_pkg(SRC_URL), "1.0", log=msgs.append,
                                 pins=["numpy<2"], extras=["x"])
     assert e["env_kind"] == "pixi.lock" and e["pixi_frozen"] is True
     assert "--frozen" in locked_pkg.installs[0] and "--frozen" in locked_pkg.checks[0]
@@ -581,7 +582,7 @@ def test_locked_install_pins_satisfied(locked_pkg, monkeypatch, tmp_path):
     assert e["pins_applied"]["how"] == "satisfied by the package's pixi.lock"
     assert e["pins_applied"]["versions"] == {"numpy": "1.26.4"}
     # the package's own lock is used untouched
-    lock = catalog.env_dir("my-tasks", "1.0") / "source" / "my_tasks-1.0" / "pixi.lock"
+    lock = paths.env_dir("my-tasks", "1.0") / "source" / "my_tasks-1.0" / "pixi.lock"
     assert ec.file_sha256(lock) == _src_lock_sha(tmp_path)
 
 
@@ -593,10 +594,10 @@ def test_lock_violates_pins_resolves_config_with_pins(
     re-solves the package's pixi config with the pin added (conda or pypi,
     as the package comes in the lock)."""
     _lock_has(monkeypatch, {"numpy": ("2.4.3", kind)})
-    monkeypatch.setattr(catalog, "_locked_versions",
+    monkeypatch.setattr(pixi_config, "locked_versions",
                         lambda pixi, m: {"numpy": "1.26.4"})
     msgs = []
-    e = catalog.install_version(_pkg(SRC_URL), "1.0", log=msgs.append,
+    e = install.install_version(_pkg(SRC_URL), "1.0", log=msgs.append,
                                 pins=["numpy<2"])
     assert e["env_kind"] == "pixi config" and e["pixi_frozen"] is False
     assert not any("--frozen" in c for c in locked_pkg.installs)  # no wasted install
@@ -610,7 +611,7 @@ def test_lock_violates_pins_resolves_config_with_pins(
     assert f"[tool.pixi.{table}]" in e["pins_applied"]["how"]
     assert e["pins_applied"]["versions"] == {"numpy": "1.26.4"}
     # the package's own lock is kept unmodified next to the re-solved one
-    orig = catalog.env_dir("my-tasks", "1.0") / "source" / "my_tasks-1.0" / "pixi.lock.orig"
+    orig = paths.env_dir("my-tasks", "1.0") / "source" / "my_tasks-1.0" / "pixi.lock.orig"
     assert ec.file_sha256(orig) == _src_lock_sha(tmp_path)
 
 
@@ -627,9 +628,9 @@ def test_pins_unsolvable_fails_naming_the_pin(locked_pkg, monkeypatch):
     locked_pkg.fail_install = fail
     msgs = []
     with pytest.raises(RuntimeError, match=r"pinned packages my-dep==99\.0"):
-        catalog.install_version(_pkg(SRC_URL), "1.0", log=msgs.append,
+        install.install_version(_pkg(SRC_URL), "1.0", log=msgs.append,
                                 pins=["my-dep==99.0"])
-    assert not catalog.is_installed("my-tasks", "1.0")
+    assert not install.is_installed("my-tasks", "1.0")
     assert any("Install from the package's pixi config failed" in m for m in msgs)
 
 
@@ -647,21 +648,20 @@ def test_failed_check_on_lock_falls_through(locked_pkg, monkeypatch):
         calls["n"] += 1
         return real(cmd, log)
 
-    monkeypatch.setattr(catalog, "_run_streaming", run)
+    monkeypatch.setattr(install, "_run_streaming", run)
     # the lock satisfies the pin (so (a) is tried); the re-solve (b) does
     # not; the resolved install (c) does
     _lock_has(monkeypatch, {"numpy": ("1.26.4", "pypi")})
-    monkeypatch.setattr(
-        catalog, "_locked_versions",
+    monkeypatch.setattr(pixi_config, "locked_versions",
         lambda pixi, m: {"numpy": "2.0.0" if os.path.exists(
             os.path.join(os.path.dirname(m), "pixi.lock.orig")) else "1.26.4"})
     msgs = []
-    e = catalog.install_version(_pkg(SRC_URL), "1.0", log=msgs.append,
+    e = install.install_version(_pkg(SRC_URL), "1.0", log=msgs.append,
                                 pins=["numpy<2"])
     assert e["env_kind"] == "resolved" and e["pixi_frozen"] is False
     assert any("falling back" in m for m in msgs)
     assert any("pins not satisfied: numpy<2" in m for m in msgs)
-    assert not (catalog.env_dir("my-tasks", "1.0") / "source").exists()
+    assert not (paths.env_dir("my-tasks", "1.0") / "source").exists()
     manifest = tomllib_loads(open(e["pixi_manifest_path"]).read())
     assert manifest["pypi-dependencies"]["numpy"] == "<2"
     assert "generated pixi.toml" in e["pins_applied"]["how"]
@@ -669,22 +669,18 @@ def test_failed_check_on_lock_falls_through(locked_pkg, monkeypatch):
 
 def test_extras_skip_resolve_of_pixi_config(fake, project_pkg):
     msgs = []
-    e = catalog.install_version(_pkg(SRC_URL), "1.0", log=msgs.append,
+    e = install.install_version(_pkg(SRC_URL), "1.0", log=msgs.append,
                                 extras=["gpu"])
     assert e["env_kind"] == "resolved"
     assert any("not re-solving" in m for m in msgs)
 
 
 def test_use_lock_false_goes_to_resolved(locked_pkg):
-    e = catalog.install_version(_pkg(SRC_URL), "1.0", log=lambda m: None,
+    e = install.install_version(_pkg(SRC_URL), "1.0", log=lambda m: None,
                                 use_lock=False)
     assert e["env_kind"] == "resolved"
-    assert not (catalog.env_dir("my-tasks", "1.0") / "source").exists()
+    assert not (paths.env_dir("my-tasks", "1.0") / "source").exists()
 
 
 def tomllib_loads(text):
-    try:
-        import tomllib
-    except ImportError:  # Python < 3.11
-        import tomli as tomllib
     return tomllib.loads(text)

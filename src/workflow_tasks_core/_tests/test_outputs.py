@@ -2,10 +2,13 @@
 
 import json
 
-from napari_workflow_tasks._outputs import (
+from workflow_tasks_core.outputs import (
     channel_identifier,
     expected_image_urls,
     expected_label_names,
+    find_task_outputs,
+    new_image_urls,
+    new_label_names,
     reported_image_urls,
 )
 
@@ -137,3 +140,59 @@ def test_reported_images_null_or_missing(tmp_path):
     out.write_text("null")
     assert reported_image_urls(str(out), "/d/0") == []
     assert reported_image_urls(str(tmp_path / "nope.json"), "/d/0") == []
+
+
+# --------------------------------------------------------------------------
+# Outputs found on disk after a run
+# --------------------------------------------------------------------------
+
+
+def _image(path, labels=()):
+    path.mkdir(parents=True)
+    (path / "labels").mkdir()
+    (path / "labels" / ".zattrs").write_text(
+        json.dumps({"labels": list(labels)}))
+    return str(path)
+
+
+def test_find_task_outputs(tmp_path):
+    url = _image(tmp_path / "img.zarr", ["old", "DAPI_seg", "new"])
+    _image(tmp_path / "img_blur.zarr")
+    out = tmp_path / "out.json"
+    out.write_text(json.dumps({"image_list_updates": [
+        {"zarr_url": "/elsewhere/new.zarr"}]}))
+    props = {"label_name": {"type": "string"},
+             "output_image_suffix": {"type": "string", "default": "blur"},
+             "output_image_name": {"type": "string", "default": "{image_name}_x"}}
+    args = {"zarr_url": url, "label_name": "DAPI_seg"}
+
+    outputs = find_task_outputs(args, props, str(out), {"old", "DAPI_seg"})
+    # named by the arguments, or new
+    assert outputs.label_names == {"DAPI_seg", "new"}
+    assert outputs.image_urls == [
+        "/elsewhere/new.zarr", str(tmp_path / "img_blur.zarr")]
+    assert outputs.missing == [f"image {tmp_path / 'img.zarr_x'}"]
+
+
+def test_find_task_outputs_missing_label(tmp_path):
+    url = _image(tmp_path / "img.zarr")
+    args = {"zarr_url": url, "label_name": "nuclei"}
+    outputs = find_task_outputs(args, LABEL_PROPS, str(tmp_path / "no.json"),
+                                set())
+    assert outputs.label_names == set()
+    assert outputs.image_urls == []
+    assert outputs.missing == [f"label 'nuclei' in {url}"]
+
+
+def test_new_label_names(tmp_path):
+    url = _image(tmp_path / "0", ["old", "nanog_stardist_segmented", "new"])
+    args = {"channel": {"identifier": "nanog"}}
+    names = new_label_names(url, {"old", "nanog_stardist_segmented"}, args,
+                            LABEL_PROPS)
+    assert names == {"new", "nanog_stardist_segmented"}
+
+
+def test_new_image_urls():
+    updates = [{"zarr_url": "/d/0/"}, {"zarr_url": "/d/1"},
+               {"zarr_url": "/d/1"}, {"origin": "/d/0"}]
+    assert new_image_urls(updates, ["/d/0"]) == ["/d/1"]

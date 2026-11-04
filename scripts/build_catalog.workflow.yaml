@@ -14,7 +14,10 @@ on:
     branches: ["main"]
     paths:
       - "scripts/build_catalog.py"
-      - "src/napari_workflow_tasks/catalog.py"
+      - "src/workflow_tasks_core/paths.py"
+      - "src/workflow_tasks_core/task_packages.py"
+      - "src/workflow_tasks_core/manifests.py"
+      - "src/workflow_tasks_core/snapshot.py"
       - ".github/workflows/build_catalog.yaml"
 
 permissions:

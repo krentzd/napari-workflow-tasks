@@ -20,7 +20,10 @@ from __future__ import annotations
 import json
 import os
 import string
+from dataclasses import dataclass
 from typing import Any, Optional
+
+from .zarr_meta import list_labels
 
 LABEL_NAME_ARGS = ('label_name', 'output_label_name')
 CHANNEL_PLACEHOLDER = '{channel_identifier}'
@@ -113,3 +116,67 @@ def reported_image_urls(out_json: str, zarr_url: str) -> list[str]:
         if url and os.path.normpath(url) != os.path.normpath(zarr_url):
             urls.append(url)
     return urls
+
+
+# --------------------------------------------------------------------------
+# Outputs found on disk after a run
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class TaskOutputs:
+    """What a run on one image wrote, going by its arguments and the disk."""
+
+    label_names: set[str]  # label images in the input image to show
+    image_urls: list[str]  # images to open
+    missing: list[str]     # expected outputs that are not on disk, as text
+
+
+def find_task_outputs(
+    args: dict, props: dict, out_json: str, labels_before: set[str]
+) -> TaskOutputs:
+    """Outputs of a run on ``args['zarr_url']``: the labels named by its
+    arguments or new since ``labels_before``, the images it reports in its
+    ``--out-json`` file and the new images its arguments name."""
+    zarr_url = args['zarr_url']
+    labels_on_disk = set(list_labels(zarr_url))
+    expected_labels = expected_label_names(args, props)
+    label_names = (labels_on_disk & set(expected_labels)) | (
+        labels_on_disk - labels_before
+    )
+    missing = [f"label '{n}' in {zarr_url}"
+               for n in expected_labels if n not in labels_on_disk]
+
+    image_urls = reported_image_urls(out_json, zarr_url)
+    for url in expected_image_urls(args, props, zarr_url):
+        if os.path.isdir(url):
+            if url not in image_urls:
+                image_urls.append(url)
+        elif url not in image_urls:
+            missing.append(f"image {url}")
+    return TaskOutputs(label_names, image_urls, missing)
+
+
+def new_label_names(
+    zarr_url: str, labels_before: set[str], args: dict, props: dict
+) -> set[str]:
+    """Label images of ``zarr_url`` to show after a run: those new since
+    ``labels_before`` and those named by the arguments."""
+    on_disk = set(list_labels(zarr_url))
+    names = on_disk - labels_before
+    names |= on_disk & set(expected_label_names(
+        {**args, 'zarr_url': zarr_url}, props))
+    return names
+
+
+def new_image_urls(
+    image_list_updates: list[dict], input_urls: list[str]
+) -> list[str]:
+    """Images in a run's ``image_list_updates`` that are not its inputs."""
+    input_set = {os.path.normpath(u) for u in input_urls}
+    new_urls = []
+    for update in image_list_updates:
+        url = update.get('zarr_url')
+        if url and os.path.normpath(url) not in input_set and url not in new_urls:
+            new_urls.append(url)
+    return new_urls

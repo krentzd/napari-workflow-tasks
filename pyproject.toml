@@ -17,20 +17,19 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
-requires-python = ">=3.8, <3.12"
+requires-python = ">=3.11"
 dependencies = [
     "numpy",
-    "magicgui",
+    "packaging",
     "qtpy",
-    "scikit-image",
     "ngio",
     "napari",
+    "napari-ome-zarr",
 ]
 
 [project.optional-dependencies]
@@ -63,13 +62,14 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "*" = ["*.yaml"]
+napari_workflow_tasks = ["logo_images/*.png", "_tests/data/*.json"]
 
 [tool.setuptools.dynamic]
 version = {attr = "napari_workflow_tasks.__init__.__version__"}
 
 [tool.black]
 line-length = 79
-target-version = ['py38', 'py39', 'py310']
+target-version = ['py311', 'py312', 'py313']
 
 [tool.ruff]
 line-length = 79
@@ -112,7 +112,7 @@ exclude = [
     "*vendored*",
     "*_vendor*",
 ]
-target-version = "py38"
+target-version = "py311"
 fix = true
 
 [tool.pixi.workspace]
@@ -122,9 +122,8 @@ platforms = ["osx-arm64", "win-64", "linux-64"]
 [tool.pixi.pypi-dependencies]
 napari-workflow-tasks = { path = ".", editable = true }
 numpy = "*"
-magicgui = "*"
+packaging = "*"
 qtpy = "*"
-scikit-image = "*"
 ngio = "*"
 napari = "*"
 napari-ome-zarr = "*"

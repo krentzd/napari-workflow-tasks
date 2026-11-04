@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from workflow_tasks_core.schema import SchemaError
+
 pytest.importorskip("qtpy")
 from napari_workflow_tasks._schema_form import (  # noqa: E402
     ListField,
@@ -10,7 +12,6 @@ from napari_workflow_tasks._schema_form import (  # noqa: E402
     ModelListField,
     NumberField,
     OptionalField,
-    SchemaError,
     SchemaForm,
     UnionField,
 )
