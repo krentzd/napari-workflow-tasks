@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
@@ -446,7 +447,9 @@ def has_pixi_lock(pv: PackageVersion) -> Optional[bool]:
     """
     Whether the release ships a pixi.lock. Cheap for GitHub releases (one
     request to raw.githubusercontent.com, not the API); None (unknown) for
-    PyPI sdists, which have to be downloaded to tell.
+    PyPI sdists, which have to be downloaded to tell, and when the request
+    fails for another reason than "not found" (e.g. a timeout): then the
+    install looks into the source archive itself.
     """
     if pv.pixi_lock is not None:
         return pv.pixi_lock
@@ -462,8 +465,10 @@ def has_pixi_lock(pv: PackageVersion) -> Optional[bool]:
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT):
             pv.pixi_lock = True
-    except Exception:  # noqa: BLE001
-        pv.pixi_lock = False
+    except urllib.error.HTTPError as e:
+        pv.pixi_lock = False if e.code == 404 else None
+    except Exception:  # noqa: BLE001  (network problem: still unknown)
+        pv.pixi_lock = None
     return pv.pixi_lock
 
 

@@ -1,4 +1,5 @@
 import tomllib
+import urllib.error
 
 import pytest
 
@@ -150,6 +151,29 @@ def test_has_pixi_lock_release_url(monkeypatch):
     assert seen == [("HEAD", "https://raw.githubusercontent.com/o/r/v1.1/pixi.lock")]
 
 
+LOCK_URL = "https://raw.githubusercontent.com/o/r/v1.1/pixi.lock"
+
+
+@pytest.mark.parametrize("error, expected", [
+    (urllib.error.HTTPError(LOCK_URL, 404, "Not Found", {}, None), False),
+    # anything else means "could not check", not "no pixi.lock"
+    (urllib.error.HTTPError(LOCK_URL, 429, "Too Many Requests", {}, None), None),
+    (urllib.error.URLError("timed out"), None),
+    (TimeoutError("timed out"), None),
+])
+def test_has_pixi_lock_only_not_found_means_no_lock(monkeypatch, error, expected):
+    def fake_urlopen(req, timeout=None):
+        raise error
+
+    monkeypatch.setattr(task_packages.urllib.request, "urlopen", fake_urlopen)
+    pv = task_packages.PackageVersion(
+        "1.1", "https://github.com/o/r/releases/download/v1.1/my_tasks-1.1-py3-none-any.whl",
+        "my_tasks-1.1-py3-none-any.whl",
+        source_url="https://github.com/o/r/releases/download/v1.1/my_tasks-1.1.tar.gz")
+    assert task_packages.has_pixi_lock(pv) is expected
+    assert pv.pixi_lock is expected
+
+
 def test_source_build_env_for_tag_archive():
     pkg = task_packages.TaskPackage("https://github.com/o/r", "github", "my-tasks", [])
     env = install._source_build_env(pkg, "1.0")
@@ -183,11 +207,12 @@ def test_tag_archive_upgraded_to_release_asset(tmp_path, monkeypatch):
         "my_tasks-1.0-py3-none-any.whl", pixi_lock=True,
         source_url="https://github.com/o/r/archive/refs/tags/v1.0.tar.gz")
     pkg = task_packages.TaskPackage("https://github.com/o/r", "github", "my-tasks", [pv])
-    src = install._prepare_source(pkg, "1.0", lambda m: None)
+    src, note = install._prepare_source(pkg, "1.0", lambda m: None)
     assert got == [asset] and src.url == asset and src.env is None
+    assert note is None
     # no asset: the tag archive, built with the pretend version
     monkeypatch.setattr(task_packages, "release_sdist_guess", lambda pv: None)
-    src = install._prepare_source(pkg, "1.0", lambda m: None)
+    src, note = install._prepare_source(pkg, "1.0", lambda m: None)
     assert src.url == pv.source_url
     assert src.env["SETUPTOOLS_SCM_PRETEND_VERSION"] == "1.0"
 

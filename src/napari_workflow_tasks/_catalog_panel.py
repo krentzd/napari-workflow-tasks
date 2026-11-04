@@ -578,6 +578,8 @@ class CatalogPanel(QGroupBox):
         skipped = entry.get("skipped")
         if skipped:
             how += f" (skipped: {', '.join(skipped)})"
+        if not entry.get("pixi_frozen") and entry.get("lock_note"):
+            how += f" (not from its pixi.lock: {entry['lock_note']})"
         self.status.setText(f"Installed {pkg.pkg_name}=={version}{how}.")
         show_info(f"Installed {pkg.pkg_name}=={version}{how}")
         self.installed.emit(pkg, version, info, entry, task_name)
