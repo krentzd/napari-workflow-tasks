@@ -1,7 +1,7 @@
 """
 Run Fractal tasks locally, the way fractal-server's runner does
-(``fractal_server/runner/v2/runner_functions.py``), on OME-Zarr images that
-are loaded in the napari viewer.
+(``fractal_server/runner/v2/runner_functions.py``), on existing OME-Zarr
+images.
 
 * parallel:      ``executable_parallel`` once per image,
                  ``{"zarr_url": ..., **args_parallel}``
@@ -13,7 +13,7 @@ are loaded in the napari viewer.
                  item.init_args, **args_parallel}``
 
 Converter tasks (whose setup step takes no ``zarr_urls``) create new
-OME-Zarrs from raw data and are not run on viewer images.
+OME-Zarrs from raw data and are not run on existing images.
 
 No Qt here: the plugin runs :func:`run_task_job` in a napari worker thread and
 shows the yielded lines in the task's log.
@@ -29,8 +29,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
 
-from .catalog import task_kind  # noqa: F401  (re-exported)
-
 # ---------------------------------------------------------------------------
 # Task kinds
 # ---------------------------------------------------------------------------
@@ -40,7 +38,7 @@ RUNNABLE_KINDS = ("parallel", "non_parallel", "compound")
 
 
 # ---------------------------------------------------------------------------
-# OME-Zarr images behind viewer layers
+# OME-Zarr images behind a path
 # ---------------------------------------------------------------------------
 
 
@@ -61,8 +59,9 @@ def _attrs(path: Path) -> dict:
 
 def image_urls(path: Optional[str]) -> list[str]:
     """
-    OME-Zarr image(s) behind a path opened in napari: an image, a label
-    inside an image (``.../0/labels/nuclei``), a well, or a whole plate.
+    OME-Zarr image(s) behind a path (e.g. one opened in napari): an
+    image, a label inside an image (``.../0/labels/nuclei``), a well, or a
+    whole plate.
     """
     if not path:
         return []
@@ -85,13 +84,6 @@ def image_urls(path: Optional[str]) -> list[str]:
             urls += image_urls(str(root / well["path"]))
         return urls
     return [path] if root.exists() else []
-
-
-def layer_image_urls(layer) -> list[str]:
-    """Images behind a napari layer (opened from disk or added by the plugin)."""
-    path = getattr(getattr(layer, "source", None), "path", None)
-    path = path or layer.metadata.get("zarr_url")
-    return image_urls(path)
 
 
 def short_name(zarr_url: str) -> str:
@@ -126,9 +118,14 @@ def default_zarr_dir(zarr_urls: list[str]) -> str:
 class TaskFailed(Exception):
     """A task step failed.
 
+    ``result``: the :class:`TaskResult` so far (which images were processed
+    and which failed) when a per-image step failed, else None.
+
     Not a RuntimeError on purpose: superqt's generator workers treat a
     RuntimeError as "worker deleted" and swallow it (no errored/finished).
     """
+
+    result = None
 
 
 @dataclass
@@ -153,7 +150,39 @@ class TaskResult:
     failed: list[str] = field(default_factory=list)
 
 
+def pixi_run_prefix(pixi: str, entry: dict) -> list[str]:
+    """Command prefix that runs ``python`` in the pixi environment of an
+    installed package (catalog install ``entry``)."""
+    frozen = ['--frozen'] if entry.get('pixi_frozen') else []
+    return [pixi, 'run', *frozen, '--manifest-path',
+            entry['pixi_manifest_path'], 'python']
+
+
+def task_command(
+    run_prefix: list[str], executable: str, args_json, out_json
+) -> list[str]:
+    """Command that runs a task executable with its arguments JSON and
+    output JSON (``--args-json``, ``--out-json``)."""
+    return [*run_prefix, executable,
+            "--args-json", str(args_json), "--out-json", str(out_json)]
+
+
+def stream_process(cmd: list[str]) -> Iterator[str]:
+    """Run a command, yielding its output lines; returns the exit code."""
+    env = dict(os.environ, PYTHONUNBUFFERED='1')
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, env=env,
+    )
+    for line in proc.stdout:
+        yield line.rstrip('\n')
+    return proc.wait()
+
+
 def _stream(cmd: list[str]) -> Iterator[str]:
+    """Like :func:`stream_process`, but raises :class:`TaskFailed` with the
+    last non-empty output line if the command fails, instead of returning
+    the exit code."""
     env = dict(os.environ, PYTHONUNBUFFERED="1")
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -180,8 +209,7 @@ def _run_step(
     args_file.write_text(json.dumps(args, indent=1))
     if out_file.exists():
         out_file.unlink()
-    cmd = [*job.run_prefix, executable,
-           "--args-json", str(args_file), "--out-json", str(out_file)]
+    cmd = task_command(job.run_prefix, executable, args_file, out_file)
     yield f"$ {' '.join(cmd)}"
     yield from _stream(cmd)
     if out_file.exists():
@@ -225,6 +253,7 @@ def _run_per_image(
             result.failed.append(url)
             yield f"✗ {short_name(url)} failed: {e}"
             if job.stop_on_error:
+                e.result = result
                 raise
             continue
         _merge(result, output)
@@ -273,6 +302,8 @@ def _run_task_job(job: TaskJob) -> Iterator[str]:
                 yield "Nothing to compute."
             yield from _run_per_image(job, items, result, "compute")
     else:
-        raise ValueError(f"Cannot run {job.kind} tasks on viewer images")
+        raise ValueError(
+            f"Cannot run {job.kind} tasks on existing OME-Zarr images"
+        )
 
     return result

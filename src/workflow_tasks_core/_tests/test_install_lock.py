@@ -2,7 +2,7 @@ import tomllib
 
 import pytest
 
-from napari_workflow_tasks import catalog
+from workflow_tasks_core import install, paths, pixi_config, task_packages
 
 LOCK = """version: 6
 environments:
@@ -26,20 +26,20 @@ packages:
 
 
 def test_lock_platforms():
-    assert catalog.lock_platforms(LOCK) == ["linux-64", "osx-arm64"]
-    assert catalog.lock_platforms(LOCK, "dev") == ["win-64"]
-    assert catalog.lock_platforms("version: 6\npackages: []\n") == []
+    assert pixi_config.lock_platforms(LOCK) == ["linux-64", "osx-arm64"]
+    assert pixi_config.lock_platforms(LOCK, "dev") == ["win-64"]
+    assert pixi_config.lock_platforms("version: 6\npackages: []\n") == []
 
 
 def test_merge_system_requirements():
-    merged, problems = catalog.merge_system_requirements({}, {"macos": "26.7.1"})
+    merged, problems = pixi_config.merge_system_requirements({}, {"macos": "26.7.1"})
     assert merged == {"macos": "26.7.1"} and problems == []
-    merged, problems = catalog.merge_system_requirements(
+    merged, problems = pixi_config.merge_system_requirements(
         {"macos": "14.0"}, {"macos": "26.7.1"})
     assert merged == {"macos": "14.0"} and problems == []
-    _, problems = catalog.merge_system_requirements({"macos": "15"}, {"macos": "13.0"})
+    _, problems = pixi_config.merge_system_requirements({"macos": "15"}, {"macos": "13.0"})
     assert problems
-    merged, _ = catalog.merge_system_requirements(
+    merged, _ = pixi_config.merge_system_requirements(
         {"libc": {"family": "glibc", "version": "2.28"}}, {"libc": "2.35"})
     assert merged["libc"]["version"] == "2.28"
 
@@ -48,7 +48,7 @@ def test_write_system_requirements(tmp_path):
     p = tmp_path / "pyproject.toml"
     p.write_text('[project]\nname = "x"\n\n[tool.pixi.system-requirements]\n'
                  'macos = "11"\n\n[tool.pixi.tasks]\na = "b"\n')
-    catalog.write_system_requirements(p, {"macos": "26.7.1", "cuda": "12"})
+    pixi_config.write_system_requirements(p, {"macos": "26.7.1", "cuda": "12"})
     d = tomllib.loads(p.read_text())
     assert d["tool"]["pixi"]["system-requirements"] == {"macos": "26.7.1", "cuda": "12"}
     assert d["tool"]["pixi"]["tasks"] == {"a": "b"}
@@ -56,32 +56,48 @@ def test_write_system_requirements(tmp_path):
 
 def test_unmet_pins():
     v = {"cellpose": "4.1.1", "numpy": "2.0.0"}
-    assert catalog.unmet_pins(["cellpose<4.2"], v) == []
-    assert catalog.unmet_pins(["numpy<2"], v) == ["numpy<2 (env has 2.0.0)"]
-    assert catalog.unmet_pins(["torch<3"], v) == []
+    assert pixi_config.unmet_pins(["cellpose<4.2"], v) == []
+    assert pixi_config.unmet_pins(["numpy<2"], v) == ["numpy<2 (env has 2.0.0)"]
+    assert pixi_config.unmet_pins(["torch<3"], v) == []
 
 
 def test_is_installed_source_layout(tmp_path, monkeypatch):
-    monkeypatch.setattr(catalog, "ENVS_DIR", tmp_path)
+    monkeypatch.setattr(paths, "ENVS_DIR", tmp_path)
     p = tmp_path / "pkg" / "1.0" / "source" / "pkg-1.0"
     (p / ".pixi" / "envs").mkdir(parents=True)
     (p / "pyproject.toml").write_text("")
-    assert catalog.is_installed("pkg", "1.0")
+    assert install.is_installed("pkg", "1.0")
     # a failed / interrupted install is not reported as installed
-    (tmp_path / "pkg" / "1.0" / catalog.INCOMPLETE_MARKER).write_text("")
-    assert not catalog.is_installed("pkg", "1.0")
+    (tmp_path / "pkg" / "1.0" / install.INCOMPLETE_MARKER).write_text("")
+    assert not install.is_installed("pkg", "1.0")
 
 
 def test_write_system_requirements_pixi_toml(tmp_path):
     p = tmp_path / "pixi.toml"
     p.write_text('[workspace]\nname = "x"\n\n[system-requirements]\nmacos = "11"\n'
                  '\n[tasks]\na = "b"\n')
-    catalog.write_system_requirements(p, {"macos": "26.7.1"})
-    assert catalog.write_pypi_no_build(p, ["pyqt6"]) == ["pyqt6"]
+    pixi_config.write_system_requirements(p, {"macos": "26.7.1"})
+    assert pixi_config.write_pypi_no_build(p, ["pyqt6"]) == ["pyqt6"]
     d = tomllib.loads(p.read_text())
     assert d["system-requirements"] == {"macos": "26.7.1"}
     assert d["pypi-options"] == {"no-build": ["pyqt6"]}
     assert d["tasks"] == {"a": "b"} and d["workspace"]["name"] == "x"
+
+
+def test_write_skip_to_pixi_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(pixi_config.sys, "platform", "darwin")
+    p = tmp_path / "pixi.toml"
+    p.write_text('[workspace]\nname = "x"\n\n[pypi-options]\n'
+                 'no-build = ["pyqt6"]\n'
+                 'dependency-overrides = { numpy = "<2" }\n')
+    pixi_config.write_skip_to_pixi_config(p, ["cupy-cuda12x"])
+    options = tomllib.loads(p.read_text())["pypi-options"]
+    assert options["no-build"] == ["pyqt6"]
+    assert options["dependency-overrides"] == {
+        "numpy": "<2",
+        "cupy-cuda12x": {"version": "*",
+                         "env-markers": "sys_platform != 'darwin'"},
+    }
 
 
 # --------------------------------------------------------------------------
@@ -97,18 +113,18 @@ def _release(tag, *names):
 
 
 def test_github_versions_prefer_sdist_asset(monkeypatch):
-    monkeypatch.setattr(catalog, "_github_get_json", lambda url: [
+    monkeypatch.setattr(task_packages, "_github_get_json", lambda url: [
         _release("v1.1", "my_tasks-1.1-py3-none-any.whl", "my_tasks-1.1.tar.gz"),
         _release("v1.0", "my_tasks-1.0-py3-none-any.whl"),
     ])
-    v11, v10 = catalog._list_github_versions("o", "r")
+    v11, v10 = task_packages._list_github_versions("o", "r")
     assert v11.source_url == "https://github.com/o/r/releases/download/v1.1/my_tasks-1.1.tar.gz"
     assert v11.source_size == 1234
     assert v10.source_url == "https://github.com/o/r/archive/refs/tags/v1.0.tar.gz"
     assert v10.source_size is None
     # has_pixi_lock reads the raw file by tag for both URL forms
-    assert catalog._github_tag_from_source_url(v11.source_url) == ("o", "r", "v1.1")
-    assert catalog._github_tag_from_source_url(v10.source_url) == ("o", "r", "v1.0")
+    assert task_packages._github_tag_from_source_url(v11.source_url) == ("o", "r", "v1.1")
+    assert task_packages._github_tag_from_source_url(v10.source_url) == ("o", "r", "v1.0")
 
 
 def test_has_pixi_lock_release_url(monkeypatch):
@@ -125,22 +141,22 @@ def test_has_pixi_lock_release_url(monkeypatch):
         seen.append((req.get_method(), req.full_url))
         return _Res()
 
-    monkeypatch.setattr(catalog.urllib.request, "urlopen", fake_urlopen)
-    pv = catalog.PackageVersion(
+    monkeypatch.setattr(task_packages.urllib.request, "urlopen", fake_urlopen)
+    pv = task_packages.PackageVersion(
         "1.1", "https://github.com/o/r/releases/download/v1.1/my_tasks-1.1-py3-none-any.whl",
         "my_tasks-1.1-py3-none-any.whl",
         source_url="https://github.com/o/r/releases/download/v1.1/my_tasks-1.1.tar.gz")
-    assert catalog.has_pixi_lock(pv) is True
+    assert task_packages.has_pixi_lock(pv) is True
     assert seen == [("HEAD", "https://raw.githubusercontent.com/o/r/v1.1/pixi.lock")]
 
 
 def test_source_build_env_for_tag_archive():
-    pkg = catalog.TaskPackage("https://github.com/o/r", "github", "my-tasks", [])
-    env = catalog._source_build_env(pkg, "1.0")
+    pkg = task_packages.TaskPackage("https://github.com/o/r", "github", "my-tasks", [])
+    env = install._source_build_env(pkg, "1.0")
     assert env["SETUPTOOLS_SCM_PRETEND_VERSION"] == "1.0"
     assert env["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_MY_TASKS"] == "1.0"
-    assert catalog._is_tag_archive("https://github.com/o/r/archive/refs/tags/v1.tar.gz")
-    assert not catalog._is_tag_archive(
+    assert task_packages.is_tag_archive("https://github.com/o/r/archive/refs/tags/v1.tar.gz")
+    assert not task_packages.is_tag_archive(
         "https://github.com/o/r/releases/download/v1/my_tasks-1.tar.gz")
 
 
@@ -150,7 +166,7 @@ def test_tag_archive_upgraded_to_release_asset(tmp_path, monkeypatch):
     import io
     import tarfile
 
-    monkeypatch.setattr(catalog, "ENVS_DIR", tmp_path / "envs")
+    monkeypatch.setattr(paths, "ENVS_DIR", tmp_path / "envs")
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for name, text in {"pyproject.toml": "[tool.pixi.workspace]\n",
@@ -159,19 +175,19 @@ def test_tag_archive_upgraded_to_release_asset(tmp_path, monkeypatch):
             info.size = len(text)
             tar.addfile(info, io.BytesIO(text.encode()))
     got = []
-    monkeypatch.setattr(catalog, "_http_get", lambda url, headers=None: (got.append(url), buf.getvalue())[1])
+    monkeypatch.setattr(task_packages, "http_get", lambda url, headers=None: (got.append(url), buf.getvalue())[1])
     asset = "https://github.com/o/r/releases/download/v1.0/my_tasks-1.0.tar.gz"
-    monkeypatch.setattr(catalog, "_release_sdist_guess", lambda pv: (asset, 10))
-    pv = catalog.PackageVersion(
+    monkeypatch.setattr(task_packages, "release_sdist_guess", lambda pv: (asset, 10))
+    pv = task_packages.PackageVersion(
         "1.0", "https://github.com/o/r/releases/download/v1.0/my_tasks-1.0-py3-none-any.whl",
         "my_tasks-1.0-py3-none-any.whl", pixi_lock=True,
         source_url="https://github.com/o/r/archive/refs/tags/v1.0.tar.gz")
-    pkg = catalog.TaskPackage("https://github.com/o/r", "github", "my-tasks", [pv])
-    src = catalog._prepare_source(pkg, "1.0", lambda m: None)
+    pkg = task_packages.TaskPackage("https://github.com/o/r", "github", "my-tasks", [pv])
+    src = install._prepare_source(pkg, "1.0", lambda m: None)
     assert got == [asset] and src.url == asset and src.env is None
     # no asset: the tag archive, built with the pretend version
-    monkeypatch.setattr(catalog, "_release_sdist_guess", lambda pv: None)
-    src = catalog._prepare_source(pkg, "1.0", lambda m: None)
+    monkeypatch.setattr(task_packages, "release_sdist_guess", lambda pv: None)
+    src = install._prepare_source(pkg, "1.0", lambda m: None)
     assert src.url == pv.source_url
     assert src.env["SETUPTOOLS_SCM_PRETEND_VERSION"] == "1.0"
 
@@ -218,14 +234,14 @@ packages:
 
 
 def test_lock_platforms_named():
-    assert catalog.lock_platform_names(LOCK_V7_NAMED) == {
+    assert pixi_config.lock_platform_names(LOCK_V7_NAMED) == {
         "linux-64": "linux-64", "osx-arm64-host": "osx-arm64",
         "osx-64-macos-14-0": "osx-64"}
-    assert catalog.lock_platforms(LOCK_V7_NAMED) == ["linux-64", "osx-arm64", "osx-64"]
-    assert catalog.lock_platforms(LOCK_V7_NAMED, "dev") == ["osx-arm64"]
+    assert pixi_config.lock_platforms(LOCK_V7_NAMED) == ["linux-64", "osx-arm64", "osx-64"]
+    assert pixi_config.lock_platforms(LOCK_V7_NAMED, "dev") == ["osx-arm64"]
     # v6 (keyed by subdir) unchanged
-    assert catalog.lock_platform_names(LOCK) == {"linux-64": "linux-64",
-                                                 "osx-arm64": "osx-arm64"}
+    assert pixi_config.lock_platform_names(LOCK) == {"linux-64": "linux-64",
+                                                     "osx-arm64": "osx-arm64"}
 
 
 def test_check_pins_against_lock(tmp_path, monkeypatch):
@@ -238,19 +254,19 @@ def test_check_pins_against_lock(tmp_path, monkeypatch):
                                    "cellpose": ("4.1.1", "pypi")},
                 "linux-64": {"libgcc": ("15", "conda")}}.get(name)
 
-    monkeypatch.setattr(catalog, "lock_package_versions", fake_list)
+    monkeypatch.setattr(pixi_config, "lock_package_versions", fake_list)
     m = tmp_path / "pixi.toml"
-    r = catalog.check_pins_against_lock(
+    r = pixi_config.check_pins_against_lock(
         "pixi", m, LOCK_V7_NAMED, "osx-arm64", ["cellpose<4.2", "numpy<2"])
     assert r.checked and r.unmet == ["numpy<2 (lock has 2.4.3)"]
     assert r.versions == {"cellpose": "4.1.1", "numpy": "2.4.3"}
     assert r.kinds["python"] == "conda" and r.kinds["numpy"] == "pypi"
     assert seen[0] == "osx-arm64-host"  # the lock's name, not the subdir
-    r = catalog.check_pins_against_lock(
+    r = pixi_config.check_pins_against_lock(
         "pixi", m, LOCK_V7_NAMED, "osx-arm64", ["cellpose<4.2"])
     assert r.checked and r.unmet == []
     # lock does not cover the platform: not checked, kinds from another one
-    r = catalog.check_pins_against_lock(
+    r = pixi_config.check_pins_against_lock(
         "pixi", m, LOCK_V7_NAMED, "win-64", ["numpy<2"])
     assert not r.checked and r.kinds
 
@@ -294,7 +310,7 @@ def test_write_platform_requirements_pyproject(tmp_path, plat):
     p.write_text(PYPROJECT_B)
     before = tomllib.loads(PYPROJECT_B)
     reqs = {"macos": "26.7.1"} if plat == "osx-arm64" else {"glibc": "2.28"}
-    assert catalog.write_platform_requirements(p, plat, reqs) == plat + "-host"
+    assert pixi_config.write_platform_requirements(p, plat, reqs) == plat + "-host"
     d = tomllib.loads(p.read_text())
     px = d["tool"]["pixi"]
     entries = px["workspace"]["platforms"]
@@ -324,12 +340,12 @@ def test_write_platform_requirements_own_table(tmp_path):
                  'libc = { family = "glibc", version = "2.34" }\n\n'
                  '[feature.lin]\nplatforms = ["linux-64"]\n\n'
                  '[dependencies]\npython = "3.12.*"\n')
-    cfg = catalog._pixi_config(p)
-    own = catalog.pixi_config_sysreqs(cfg, "osx-arm64")
+    cfg = pixi_config.read_pixi_config(p)
+    own = pixi_config.pixi_config_sysreqs(cfg, "osx-arm64")
     assert own == {"macos": "14.0"}
-    merged, problems = catalog.merge_system_requirements(own, {"macos": "26.7.1"})
+    merged, problems = pixi_config.merge_system_requirements(own, {"macos": "26.7.1"})
     assert merged == {"macos": "14.0"} and not problems  # package's own value stays
-    catalog.write_platform_requirements(p, "osx-arm64", merged)
+    pixi_config.write_platform_requirements(p, "osx-arm64", merged)
     d = tomllib.loads(p.read_text())
     assert "system-requirements" not in d
     assert d["project"]["platforms"] == [
@@ -349,13 +365,13 @@ def test_platform_requirements_package_rich_entry(tmp_path):
     p.write_text('[workspace]\nname = "x"\nchannels = ["conda-forge"]\n'
                  'platforms = [{ name = "mac", platform = "osx-arm64", '
                  'macos = "15.0" }]\n')
-    cfg = catalog._pixi_config(p)
-    own = catalog.pixi_config_sysreqs(cfg, "osx-arm64")
+    cfg = pixi_config.read_pixi_config(p)
+    own = pixi_config.pixi_config_sysreqs(cfg, "osx-arm64")
     assert own == {"macos": "15.0"}
-    _, problems = catalog.merge_system_requirements(own, {"macos": "13.0"})
+    _, problems = pixi_config.merge_system_requirements(own, {"macos": "13.0"})
     assert problems == ["macos 15.0 required, host has 13.0"]
-    merged, _ = catalog.merge_system_requirements(own, {"macos": "26.7.1"})
-    assert catalog.write_platform_requirements(p, "osx-arm64", merged) == "mac"
+    merged, _ = pixi_config.merge_system_requirements(own, {"macos": "26.7.1"})
+    assert pixi_config.write_platform_requirements(p, "osx-arm64", merged) == "mac"
     assert tomllib.loads(p.read_text())["workspace"]["platforms"] == [
         {"name": "mac", "platform": "osx-arm64", "macos": "15.0"}]
 
@@ -366,14 +382,14 @@ def test_platform_requirements_unverifiable_edit_leaves_file(tmp_path):
             'platforms = ["osx-arm64"] }\n')
     p.write_text(text)
     with pytest.raises(RuntimeError):
-        catalog.write_platform_requirements(p, "osx-arm64", {"macos": "26.7.1"})
+        pixi_config.write_platform_requirements(p, "osx-arm64", {"macos": "26.7.1"})
     assert p.read_text() == text
 
 
 def test_write_pins_to_pixi_config(tmp_path):
     p = tmp_path / "pyproject.toml"
     p.write_text(PYPROJECT_B)
-    applied = catalog.write_pins_to_pixi_config(
+    applied = pixi_config.write_pins_to_pixi_config(
         p, ["numpy<2", "Requests~=2.31", "scipy<1.14", "my-tasks<9", "zarr~=2.18"],
         {"numpy": "conda", "requests": "pypi", "zarr": "conda"}, "my-tasks")
     px = tomllib.loads(p.read_text())["tool"]["pixi"]
@@ -396,5 +412,5 @@ def test_pin_on_path_dependency_raises(tmp_path):
             '[pypi-dependencies]\nfoo = { path = "../foo" }\n')
     p.write_text(text)
     with pytest.raises(RuntimeError, match="from a path"):
-        catalog.write_pins_to_pixi_config(p, ["foo<2"], {}, "x")
+        pixi_config.write_pins_to_pixi_config(p, ["foo<2"], {}, "x")
     assert p.read_text() == text

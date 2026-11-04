@@ -9,8 +9,8 @@ Prototype started at the [2024 OME-NGFF workflows hackathon](https://doi.org/10.
 ## Requirements
 
 - [pixi](https://pixi.sh/latest/#installation) installed and available on your `PATH`. The plugin calls `pixi` to create the task environments and run tasks in them.
-- Python 3.8–3.11 (`requires-python = ">=3.8, <3.12"`)
-- PyQt5 (the widget imports `PyQt5` directly)
+- Python 3.11 or newer (`requires-python = ">=3.11"`; ngio requires 3.11)
+- A Qt binding for napari, e.g. PyQt5 (the widgets use [qtpy](https://github.com/spyder-ide/qtpy), so any binding qtpy supports works; the pixi workspace installs PyQt5)
 
 ## Installation
 
@@ -89,6 +89,17 @@ The 2D (y/x) bounding box of each polygon is saved as an ROI named `FOV_1`, `FOV
 ```bash
 pixi run -e testing pytest
 ```
+
+### Code layout
+
+The distribution `napari-workflow-tasks` ships two Python packages under `src/`:
+
+- `workflow_tasks_core`: everything that does not need a viewer. It finds task packages and their versions (`task_packages`, `snapshot`, `manifests`), installs each into its own pixi environment (`install`, `pixi_config`, `env_cache`, `progress`), keeps track of installed tasks (`tasks`), reads task argument schemas (`schema`), runs tasks (`runner`), works out what they wrote (`outputs`, `zarr_meta`) and builds ROI tables (`rois`). File locations are in `paths`.
+- `napari_workflow_tasks`: the napari plugin only, i.e. the Qt widgets (`_widget`, `_catalog_panel`, `_schema_form`), the handling of viewer layers and `napari.yaml`. It imports `workflow_tasks_core` for everything else.
+
+`workflow_tasks_core` must never import napari, Qt (`qtpy`, PyQt, PySide, `superqt`), `magicgui` or `napari_ome_zarr`, directly or indirectly, so that it can be used headless. `workflow_tasks_core/_tests/test_no_napari.py` checks this.
+
+Tests live next to the code they test, in each package's `_tests/` folder.
 
 ## How to cite
 

@@ -3,33 +3,33 @@ out extras (not pins: pinned versions win) for locked releases and reaches
 install_version."""
 import pytest
 
-from napari_workflow_tasks import catalog
+from workflow_tasks_core import install, manifests, paths, task_packages
 
 pytest.importorskip("napari")
 
 
 def _pkg(lock):
     versions = [
-        catalog.PackageVersion("1.1", "https://x/my_tasks-1.1-py3-none-any.whl",
-                               "my_tasks-1.1-py3-none-any.whl", pixi_lock=lock),
-        catalog.PackageVersion("1.0", "https://x/my_tasks-1.0-py3-none-any.whl",
-                               "my_tasks-1.0-py3-none-any.whl", pixi_lock=False),
+        task_packages.PackageVersion("1.1", "https://x/my_tasks-1.1-py3-none-any.whl",
+                                     "my_tasks-1.1-py3-none-any.whl", pixi_lock=lock),
+        task_packages.PackageVersion("1.0", "https://x/my_tasks-1.0-py3-none-any.whl",
+                                     "my_tasks-1.0-py3-none-any.whl", pixi_lock=False),
     ]
-    return catalog.TaskPackage("https://pypi.org/project/cellpose-like", "pypi",
-                               "fractal-cellpose-sam-task", versions)
+    return task_packages.TaskPackage("https://pypi.org/project/cellpose-like", "pypi",
+                                     "fractal-cellpose-sam-task", versions)
 
 
 @pytest.fixture
 def panel(qtbot, tmp_path, monkeypatch):
     from napari_workflow_tasks._catalog_panel import CatalogPanel
 
-    monkeypatch.setattr(catalog, "ENVS_DIR", tmp_path / "envs")
-    monkeypatch.setattr(catalog, "CATALOG_CACHE_DIR", tmp_path / "catalog")
+    monkeypatch.setattr(paths, "ENVS_DIR", tmp_path / "envs")
+    monkeypatch.setattr(paths, "CATALOG_CACHE_DIR", tmp_path / "catalog")
     w = CatalogPanel()
     qtbot.addWidget(w)
     pkg = _pkg(True)
     w._packages[pkg.pkg_name] = pkg
-    info = catalog.VersionInfo({"task_list": [
+    info = manifests.VersionInfo({"task_list": [
         {"name": "T", "executable_parallel": "t.py"}]}, "my_tasks",
         "my_tasks/__FRACTAL_MANIFEST__.json", [], ">=3.11")
     w._infos[(pkg.pkg_name, "1.1")] = info
@@ -71,18 +71,42 @@ def test_checkbox_reaches_install_version(panel, qtbot, monkeypatch, checked):
     w, pkg = panel
     calls = []
 
-    def fake_install(pkg_, version, extras=None, log=print, pins=None, use_lock=True):
-        calls.append((version, extras, pins, use_lock))
+    def fake_install(pkg_, version, extras=None, log=print, pins=None,
+                     use_lock=True, skip=None):
+        calls.append((version, extras, pins, use_lock, skip))
         return {"src_path": "/x", "manifest_path": "/x/m.json",
                 "pixi_manifest_path": "/x/pixi.toml", "version": version,
                 "pixi_frozen": use_lock, "env_kind": "pixi.lock" if use_lock else "resolved",
                 "pins_applied": {"pins": pins, "how": "x"}}
 
-    monkeypatch.setattr(catalog, "install_version", fake_install)
-    monkeypatch.setattr(catalog, "get_version_info", lambda p, v: w._infos[(p.pkg_name, v)])
+    monkeypatch.setattr(install, "install_version", fake_install)
+    monkeypatch.setattr(manifests, "get_version_info", lambda p, v: w._infos[(p.pkg_name, v)])
     w.lock_check.setChecked(checked)
     with qtbot.waitSignal(w.installed, timeout=10000):
         w._install_selected()
-    assert calls == [("1.1", [], ["cellpose<4.2"], checked)]
+    assert calls == [("1.1", [], ["cellpose<4.2"], checked, [])]
     assert ("from its pixi.lock" in w.status.text()) == checked
     assert "pinned: cellpose<4.2" in w.status.text()
+
+
+def test_skipped_packages_reach_install_version(panel, qtbot, monkeypatch):
+    w, pkg = panel
+    monkeypatch.setattr(install, "suggested_skip", lambda name: ["cupy-cuda12x"])
+    w._update_extras_suggestion()
+    assert w.skip_edit.text() == "cupy-cuda12x"
+    calls = []
+
+    def fake_install(pkg_, version, extras=None, log=print, pins=None,
+                     use_lock=True, skip=None):
+        calls.append(skip)
+        return {"src_path": "/x", "manifest_path": "/x/m.json",
+                "pixi_manifest_path": "/x/pixi.toml", "version": version,
+                "pixi_frozen": False, "env_kind": "resolved",
+                "pins_applied": None, "skipped": skip}
+
+    monkeypatch.setattr(install, "install_version", fake_install)
+    monkeypatch.setattr(manifests, "get_version_info", lambda p, v: w._infos[(p.pkg_name, v)])
+    with qtbot.waitSignal(w.installed, timeout=10000):
+        w._install_selected()
+    assert calls == [["cupy-cuda12x"]]
+    assert "skipped: cupy-cuda12x" in w.status.text()

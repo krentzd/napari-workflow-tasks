@@ -26,7 +26,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import sys
 import time
@@ -34,25 +33,24 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 
-# Import catalog.py directly: it only needs the stdlib and `packaging`, and
-# importing the package itself would pull in napari/Qt.
-_CATALOG_PY = (
-    Path(__file__).resolve().parents[1]
-    / "src" / "napari_workflow_tasks" / "catalog.py"
+# Run from a checkout without installing the package (the CI job only
+# installs `packaging`): make src/ importable.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from workflow_tasks_core import (  # noqa: E402
+    manifests,
+    snapshot,
+    task_packages,
 )
-_spec = importlib.util.spec_from_file_location("nwt_catalog", _CATALOG_PY)
-catalog = importlib.util.module_from_spec(_spec)
-sys.modules["nwt_catalog"] = catalog
-_spec.loader.exec_module(catalog)
 
 
 def _version_entry(pkg, pv, out: Path, errors: list) -> dict | None:
     manifest_file = out / "manifests" / pkg.pkg_name / f"{pv.version}.json"
     if manifest_file.exists():
-        info = catalog.VersionInfo(**json.loads(manifest_file.read_text()))
+        info = manifests.VersionInfo(**json.loads(manifest_file.read_text()))
     else:
         try:
-            info = catalog.read_remote_wheel_info(pv.wheel_url, pv.wheel_filename)
+            info = manifests.read_remote_wheel_info(pv.wheel_url, pv.wheel_filename)
         except Exception as e:  # noqa: BLE001
             # e.g. very old releases without a Fractal manifest
             errors.append(
@@ -64,10 +62,10 @@ def _version_entry(pkg, pv, out: Path, errors: list) -> dict | None:
     lock_cache = out / "manifests" / pkg.pkg_name / f"{pv.version}.pixi_lock"
     if lock_cache.exists():
         pv.pixi_lock = lock_cache.read_text().strip() == "1"
-    elif catalog.has_pixi_lock(pv) is not None:
+    elif task_packages.has_pixi_lock(pv) is not None:
         lock_cache.write_text("1" if pv.pixi_lock else "0")
     entry = asdict(pv)
-    entry["summary"] = catalog.summarize_info(info)
+    entry["summary"] = manifests.summarize_info(info)
     return entry
 
 
@@ -87,7 +85,7 @@ def build(out: Path, sources: list[str], workers: int = 8) -> dict:
     for source in sources:
         t0 = time.perf_counter()
         try:
-            pkg = catalog.load_package(source)
+            pkg = task_packages.load_package(source)
         except Exception as e:  # noqa: BLE001
             print(f"!! {source}: {e}", flush=True)
             errors.append({"source": source, "error": str(e)})
@@ -122,7 +120,7 @@ def build(out: Path, sources: list[str], workers: int = 8) -> dict:
     packages.sort(key=lambda p: p["pkg_name"].lower())
     errors.sort(key=lambda e: (e.get("source", ""), e.get("pkg_name", ""), e.get("version", "")))
     index = {
-        "schema": catalog.SNAPSHOT_SCHEMA,
+        "schema": snapshot.SNAPSHOT_SCHEMA,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "sources": sources,
         "packages": packages,
@@ -141,7 +139,7 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument(
         "--sources-url",
-        default=catalog.SOURCES_URL,
+        default=task_packages.SOURCES_URL,
         help="URL of the list of task-package sources",
     )
     parser.add_argument(
@@ -151,7 +149,7 @@ def main(argv=None):
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args(argv)
 
-    sources = catalog.fetch_sources(args.sources_url)
+    sources = task_packages.fetch_sources(args.sources_url)
     if args.only:
         sources = [s for s in sources if any(o in s for o in args.only)]
 

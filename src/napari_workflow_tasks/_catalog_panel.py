@@ -31,50 +31,30 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from . import catalog
-from .catalog import TaskPackage, VersionInfo, task_kind
+from workflow_tasks_core import install, manifests, snapshot
+from workflow_tasks_core.manifests import VersionInfo, task_kind
+from workflow_tasks_core.progress import format_elapsed, install_step
+from workflow_tasks_core.runner import RUNNABLE_KINDS
+from workflow_tasks_core.task_packages import TaskPackage
 
 logger = logging.getLogger(__name__)
 
 ROLE = Qt.UserRole
-# What the launcher can run on images loaded in the viewer
-RUNNABLE_TYPES = ("parallel", "non_parallel", "compound")
 
 
 class _LogEmitter(QObject):
     line = Signal(str)
 
 
-# Install log line prefix -> the step shown in the progress bar
-INSTALL_STEPS = (
-    (("Looking for pixi.lock", "Using the cached", "Could not download"),
-     "Downloading the package source"),
-    (("Installing", "Solving", "Install with Python"),
-     "Installing dependencies (this can take several minutes)"),
-    (("Caching the environment", "Native-library"),
-     "Caching the environment"),
-    (("Checking that the tasks import", "Import check"),
-     "Checking that the tasks import"),
-)
-
-
-def install_step(line: str):
-    """The progress step an install log line starts, or None."""
-    line = line.strip()
-    for prefixes, step in INSTALL_STEPS:
-        if line.startswith(prefixes):
-            return step
-    return None
-
-
-def _format_elapsed(seconds: float) -> str:
-    m, s = divmod(int(seconds), 60)
-    return f"{m}m {s:02d}s" if m else f"{s}s"
-
-
 PINS_TOOLTIP = (
     "Extra version constraints for this task's environment, comma "
     "separated. Pinned versions always win. Re-install to apply."
+)
+SKIP_TOOLTIP = (
+    "Dependencies to leave out of this task's environment, comma "
+    "separated, e.g. packages that cannot be installed on this computer. "
+    "Tasks that import them fail when they are run. Not used for the "
+    "install from a release's pixi.lock. Re-install to apply."
 )
 PINS_LOCK_TOOLTIP = (
     "This release ships a pixi.lock: it is used as is if it satisfies the "
@@ -162,6 +142,17 @@ class CatalogPanel(QGroupBox):
         pins_row.layout().addWidget(self.pins_edit)
         layout.addWidget(pins_row)
 
+        # Dependencies to leave out (e.g. CUDA-only packages on macOS)
+        skip_row = QWidget()
+        skip_row.setLayout(QHBoxLayout())
+        skip_row.layout().setContentsMargins(0, 0, 0, 0)
+        skip_row.layout().addWidget(QLabel("Skip packages:"))
+        self.skip_edit = QLineEdit()
+        self.skip_edit.setPlaceholderText("e.g. cupy-cuda12x")
+        self.skip_edit.setToolTip(SKIP_TOOLTIP)
+        skip_row.layout().addWidget(self.skip_edit)
+        layout.addWidget(skip_row)
+
         self.lock_check = QCheckBox("Use the package's pixi.lock when available")
         self.lock_check.setChecked(True)
         self.lock_check.setToolTip(
@@ -179,7 +170,7 @@ class CatalogPanel(QGroupBox):
         layout.addWidget(self.lock_check)
 
         # Install
-        self.install_btn = QPushButton("Install task")
+        self.install_btn = QPushButton("Install package")
         self.install_btn.setEnabled(False)
         self.install_btn.clicked.connect(self._install_selected)
         layout.addWidget(self.install_btn)
@@ -227,7 +218,7 @@ class CatalogPanel(QGroupBox):
     def _show_step(self):
         if self._busy_since is None:
             return
-        elapsed = _format_elapsed(time.monotonic() - self._busy_since)
+        elapsed = format_elapsed(time.monotonic() - self._busy_since)
         self.status.setText(f"{self._step}… ({elapsed})")
 
     def _stop_busy(self):
@@ -253,7 +244,7 @@ class CatalogPanel(QGroupBox):
         self._snapshot_at = None
 
         worker = create_worker(
-            catalog.iter_catalog, live=self.live_check.isChecked(),
+            snapshot.iter_catalog, live=self.live_check.isChecked(),
             _ignore_errors=True,  # handled by _on_worker_error
         )
         worker.yielded.connect(self._on_catalog_item)
@@ -331,7 +322,7 @@ class CatalogPanel(QGroupBox):
             label = v.version
             if v.pixi_lock:
                 label += "  🔒"
-            if catalog.is_installed(pkg.pkg_name, v.version):
+            if install.is_installed(pkg.pkg_name, v.version):
                 label += "  ✓"
             if v.yanked:
                 label += "  (yanked)"
@@ -377,7 +368,7 @@ class CatalogPanel(QGroupBox):
                 x for x in (task.get("category"), task.get("modality")) if x
             )
             tooltip = (meta + "\n\n" if meta else "") + (task.get("docs_info") or "")
-            if ttype not in RUNNABLE_TYPES:
+            if ttype not in RUNNABLE_KINDS:
                 for col in range(len(self.COLUMNS)):
                     child.setForeground(col, gray)
                 reason = (
@@ -401,7 +392,7 @@ class CatalogPanel(QGroupBox):
 
         pkg = self._packages[pkg_name]
         worker = create_worker(
-            catalog.get_display_info, pkg, version, _ignore_errors=True
+            manifests.get_display_info, pkg, version, _ignore_errors=True
         )
         worker.returned.connect(
             lambda info, p=pkg_name, v=version: self._on_info_loaded(p, v, info)
@@ -460,7 +451,7 @@ class CatalogPanel(QGroupBox):
             self.install_btn.setEnabled(False)
             return
         kind, pkg_name, _task, item = sel
-        runnable = kind == "package" or item.data(2, ROLE) in RUNNABLE_TYPES
+        runnable = kind == "package" or item.data(2, ROLE) in RUNNABLE_KINDS
         self.install_btn.setEnabled(runnable)
         self._update_extras_suggestion()
 
@@ -476,8 +467,9 @@ class CatalogPanel(QGroupBox):
             suggested = "fractal-tasks"
         self.extras_edit.setText(suggested)
         self.pins_edit.setText(
-            ", ".join(catalog.SUGGESTED_PINS.get(pkg_name, []))
+            ", ".join(install.SUGGESTED_PINS.get(pkg_name, []))
         )
+        self.skip_edit.setText(", ".join(install.suggested_skip(pkg_name)))
         self._extras_tip = (
             "Available extras: " + (", ".join(info.extras) or "none")
             if info else ""
@@ -526,6 +518,9 @@ class CatalogPanel(QGroupBox):
         pins = [
             p.strip() for p in self.pins_edit.text().split(",") if p.strip()
         ]
+        skip = [
+            s.strip() for s in self.skip_edit.text().split(",") if s.strip()
+        ]
         use_lock = self.lock_check.isChecked()
 
         self.install_btn.setEnabled(False)
@@ -538,12 +533,12 @@ class CatalogPanel(QGroupBox):
         emitter.line.connect(self._on_install_log)
 
         def _install():
-            entry = catalog.install_version(
+            entry = install.install_version(
                 pkg, version, extras=extras, log=emitter.line.emit, pins=pins,
-                use_lock=use_lock,
+                use_lock=use_lock, skip=skip,
             )
             emitter.line.emit("Reading the task list")
-            return catalog.get_version_info(pkg, version), entry
+            return manifests.get_version_info(pkg, version), entry
 
         worker = create_worker(_install, _ignore_errors=True)
         worker.returned.connect(
@@ -580,6 +575,9 @@ class CatalogPanel(QGroupBox):
         pins = entry.get("pins_applied")
         if pins:
             how += f" (pinned: {', '.join(pins['pins'])})"
+        skipped = entry.get("skipped")
+        if skipped:
+            how += f" (skipped: {', '.join(skipped)})"
         self.status.setText(f"Installed {pkg.pkg_name}=={version}{how}.")
         show_info(f"Installed {pkg.pkg_name}=={version}{how}")
         self.installed.emit(pkg, version, info, entry, task_name)

@@ -1,19 +1,14 @@
-import json
 import logging
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
 
 import napari
-import numpy as np
 from napari.layers import Shapes
 from napari.qt.threading import create_worker
 from napari.utils.notifications import show_error, show_info, show_warning
 from napari_ome_zarr._reader import napari_get_reader
-from ngio import open_ome_zarr_container
-from ngio.tables import RoiTable
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtGui import QFont, QFontDatabase, QPixmap
 from qtpy.QtWidgets import (QCheckBox, QComboBox, QGroupBox,
@@ -22,57 +17,28 @@ from qtpy.QtWidgets import (QCheckBox, QComboBox, QGroupBox,
                             QPlainTextEdit, QProgressBar, QPushButton,
                             QScrollArea, QTabWidget, QVBoxLayout, QWidget)
 
+from workflow_tasks_core.outputs import (CHANNEL_PLACEHOLDER, LABEL_NAME_ARGS,
+                                         find_task_outputs, new_image_urls,
+                                         new_label_names, rewritten_inputs)
+from workflow_tasks_core.pixi_config import find_pixi
+from workflow_tasks_core.rois import write_roi_table
+from workflow_tasks_core.runner import (TaskJob, default_zarr_dir,
+                                        image_urls, pixi_run_prefix,
+                                        run_task_job, short_name,
+                                        stream_process, task_command)
+from workflow_tasks_core.schema import SchemaError, with_defs
+from workflow_tasks_core.tasks import (FractalTaskManager, docs_summary,
+                                       load_manifest, register_manifest_tasks)
+from workflow_tasks_core.zarr_meta import channel_labels, list_labels
+
 from ._catalog_panel import CatalogPanel
-from ._outputs import (CHANNEL_PLACEHOLDER, LABEL_NAME_ARGS,
-                       expected_image_urls, expected_label_names,
-                       reported_image_urls)
-from ._schema_form import (ListField, SchemaError, SchemaForm, StringField,
-                           _Collapsible)
-from ._utils import create_roi_from_bbox
-from . import catalog
-from .catalog import find_pixi, task_kind
-from ._runner import (RUNNABLE_KINDS, TaskJob, default_zarr_dir, image_urls,
-                      layer_image_urls, run_task_job, short_name)
+from ._schema_form import ListField, SchemaForm, StringField, _Collapsible
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-def _list_labels(zarr_url):
-    """Label names of an OME-Zarr image (NGFF v0.4 or v0.5), [] if none."""
-    labels_dir = Path(zarr_url) / 'labels'
-    for fname, keys in (('.zattrs', ('labels',)), ('zarr.json', ('attributes', 'ome', 'labels'))):
-        try:
-            with open(labels_dir / fname) as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            continue
-        for key in keys:
-            data = data.get(key, {}) if isinstance(data, dict) else {}
-        if isinstance(data, list):
-            return data
-    return []
-
-
 # Fields that take channel names: offer the input image's channels
 CHANNEL_FIELDS = ('identifiers', 'label', 'channel_label', 'channel_labels')
-
-
-def _channel_labels(zarr_url):
-    """Channel labels from the OME-Zarr "omero" metadata (v0.4 / v0.5)."""
-    root = Path(zarr_url)
-    for fname, keys in (('.zattrs', ('omero',)), ('zarr.json', ('attributes', 'ome', 'omero'))):
-        try:
-            with open(root / fname) as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            continue
-        for key in keys:
-            data = data.get(key, {}) if isinstance(data, dict) else {}
-        channels = data.get('channels', []) if isinstance(data, dict) else []
-        labels = [c.get('label') for c in channels if isinstance(c, dict) and c.get('label')]
-        if labels:
-            return labels
-    return []
 
 
 def _input_channel(layer_name, channels):
@@ -193,30 +159,30 @@ class ChannelAutofill:
         self._fill_labels()
 
 
+def layer_image_urls(layer) -> list[str]:
+    """Images behind a napari layer (opened from disk or added by the plugin)."""
+    path = getattr(getattr(layer, "source", None), "path", None)
+    path = path or layer.metadata.get("zarr_url")
+    return image_urls(path)
+
+
+def _from_other_image(layer, zarr_url) -> bool:
+    """Whether ``layer`` is known to show a different image than
+    ``zarr_url`` (layers of unknown origin are not)."""
+    urls = {os.path.normpath(u) for u in layer_image_urls(layer)}
+    return bool(urls) and os.path.normpath(zarr_url) not in urls
+
+
+def _without_napari_suffix(layer_name):
+    """Layer name without the " [1]", " [2]", ... napari adds to a name
+    that is already taken (e.g. "org [1]" -> "org")."""
+    return re.sub(r' \[\d+\]$', '', layer_name)
+
+
 def _label_name(layer_name):
     """Label image name of a label layer. napari-ome-zarr 0.10 names label
     layers by their path ("labels/labels/<name>"), 0.6 by the name only."""
     return layer_name.rsplit('/', 1)[-1] if isinstance(layer_name, str) else layer_name
-
-
-def _stream_process(cmd):
-    """Run a command, yielding its output lines; returns the exit code."""
-    env = dict(os.environ, PYTHONUNBUFFERED='1')
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, env=env,
-    )
-    for line in proc.stdout:
-        yield line.rstrip('\n')
-    return proc.wait()
-
-
-def _with_defs(schema):
-    """A task's args schema as a standalone object schema."""
-    schema = dict(schema or {})
-    schema.setdefault("type", "object")
-    schema.setdefault("properties", {})
-    return schema
 
 
 class _InputImages(QWidget):
@@ -300,112 +266,6 @@ def wipe_cache():
     cache = resize_dask_cache(nbytes=0)
     cache = resize_dask_cache(nbytes=cache_bytes)
 
-def abspath(
-    root,
-    relpath
-):
-
-    root = Path(root)
-    if root.is_dir():
-        path = root/relpath
-    else:
-        path = root.parent/relpath
-    return str(path.absolute())
-
-class FractalTaskManager:
-    # Manage tasks by keeping track of what each tab contains and what executable it links to
-    def __init__(self):
-        self.tasks = dict()
-
-    def add_task(
-        self,
-        name,
-        package_name,
-        parent_dir,
-        executable_parallel,
-        properties,
-        defs,
-        required,
-        type,
-        title,
-        base_name=None,
-        version=None,
-        docs_info=None,
-        docs_link=None,
-        kind='parallel',
-        executable_non_parallel=None,
-        schema_parallel=None,
-        schema_non_parallel=None,
-    ):
-        # `name` is the unique key (e.g. "Cellpose Segmentation
-        # [fractal-tasks-core==1.4.0]"); `base_name` is the manifest name.
-
-        task_dict = dict(
-            title=title,
-            base_name=base_name or name,
-            version=version,
-            docs_info=docs_info,
-            docs_link=docs_link,
-            # parallel | non_parallel | compound (see _runner)
-            kind=kind,
-            executable_non_parallel=executable_non_parallel,
-            schema_parallel=schema_parallel,
-            schema_non_parallel=schema_non_parallel,
-            package_name=package_name,
-            parent_dir=parent_dir,
-            executable_parallel=executable_parallel,
-            properties=properties,
-            defs=defs,
-            required=required,
-            type=type,
-        )
-        self.tasks[name] = task_dict
-
-    def get_executable_path(
-        self,
-        name,
-        which='parallel',
-    ):
-        parent_dir = self.tasks[name]['parent_dir']
-        exec_fname = self.tasks[name][f'executable_{which}']
-        if not exec_fname:
-            return None
-        return os.path.join(parent_dir, exec_fname)
-
-    def get_package_name(
-        self,
-        name
-    ):
-
-        return self.tasks[name]['package_name']
-
-    def get_run_dir(self, name):
-        """tasks/<package>/<version>/<task>/: the task's run files."""
-        task = self.tasks[name]
-        pkg, _, pkg_version = task['package_name'].partition('==')
-        version = task.get('version') or pkg_version or 'unversioned'
-        return catalog.task_run_dir(pkg, version, task['base_name'])
-
-    def get_path_to_json(self, name):
-        """Arguments JSON passed to the task (--args-json)."""
-        return str(self.get_run_dir(name) / f"{self.tasks[name]['title']}.json")
-
-    def get_out_json_path(self, name):
-        """Output JSON the task writes (--out-json)."""
-        return str(self.get_run_dir(name) / 'out_file.json')
-
-    def get_task(
-        self,
-        name
-    ):
-        return self.tasks[name]
-
-    def get_properties(
-        self,
-        name
-    ):
-        return self.tasks[name]['properties']
-
 
 class TasksQWidget(QWidget):
     def __init__(self, napari_viewer):
@@ -433,7 +293,8 @@ class TasksQWidget(QWidget):
         main_title.setFont(QFont('Arial', 16, weight=QFont.Bold))
         icon_img_container = QWidget()
         icon_img_container.setLayout(QHBoxLayout())
-        im_path = abspath(__file__, 'logo_images/fractal_logo.png')
+        im_path = str(Path(__file__).parent.absolute()
+                      / 'logo_images' / 'fractal_logo.png')
         icon_img = QPixmap(im_path).scaled(120, 120, Qt.KeepAspectRatio,
                                            Qt.SmoothTransformation)
         icon_label = QLabel()
@@ -545,53 +406,20 @@ class TasksQWidget(QWidget):
         self.loaded_packages[package_key] = entry
 
         # Prefer the manifest of the installed package; fall back to the wheel's
-        try:
-            manifest = self._get_json_params(entry['manifest_path'])
-        except OSError:
-            manifest = info.manifest
-
-        selected_key = None
-        skipped = []
-        for task in manifest["task_list"]:
-            kind = task_kind(task)
-            if kind not in RUNNABLE_KINDS:
-                skipped.append(task["name"])
-                continue
-            key = f"{task['name']} [{package_key}]"
-            if key not in self.task_manager.tasks:
-                schema_p = task.get("args_schema_parallel")
-                schema_np = task.get("args_schema_non_parallel")
-                # The form shown first: the per-image arguments, except for
-                # non-parallel tasks
-                schema = schema_np if kind == "non_parallel" else schema_p
-                self.task_manager.add_task(
-                    name=key,
-                    base_name=task["name"],
-                    version=version,
-                    package_name=package_key,
-                    parent_dir=entry["src_path"],
-                    executable_parallel=task.get("executable_parallel"),
-                    executable_non_parallel=task.get("executable_non_parallel"),
-                    properties=schema.get("properties", {}),
-                    defs=schema.get("$defs", None),
-                    required=schema.get("required", []),
-                    type=schema.get("type"),
-                    title=schema.get("title", task["name"]),
-                    docs_info=task.get("docs_info"),
-                    docs_link=task.get("docs_link"),
-                    kind=kind,
-                    schema_parallel=schema_p,
-                    schema_non_parallel=schema_np,
-                )
-                self.workflow_combo_box.addItem(key)
-            if task["name"] == selected_task:
-                selected_key = key
-        if skipped:
+        manifest = load_manifest(entry, fallback=info.manifest)
+        registered = register_manifest_tasks(
+            self.task_manager, manifest, package_key, version,
+            entry["src_path"],
+        )
+        for key in registered.added:
+            self.workflow_combo_box.addItem(key)
+        if registered.skipped:
             logger.info(
                 f"{package_key}: not runnable on viewer images (converters): "
-                + ", ".join(skipped)
+                + ", ".join(registered.skipped)
             )
 
+        selected_key = registered.keys.get(selected_task)
         if selected_key is not None:
             self.workflow_combo_box.setCurrentText(selected_key)
             self._add_task()
@@ -607,21 +435,11 @@ class TasksQWidget(QWidget):
         props = self.task_manager.get_properties(task_name)
         out_json = self.task_manager.get_out_json_path(task_name)
 
-        labels_on_disk = set(_list_labels(path_to_zarr))
-        expected_labels = expected_label_names(args, props)
-        label_names = (labels_on_disk & set(expected_labels)) | (
-            labels_on_disk - ui.get('labels_before', set())
-        )
-        missing = [f"label '{n}' in {path_to_zarr}"
-                   for n in expected_labels if n not in labels_on_disk]
-
-        image_urls = reported_image_urls(out_json, path_to_zarr)
-        for url in expected_image_urls(args, props, path_to_zarr):
-            if os.path.isdir(url):
-                if url not in image_urls:
-                    image_urls.append(url)
-            elif url not in image_urls:
-                missing.append(f"image {url}")
+        outputs = find_task_outputs(
+            args, props, out_json, ui.get('labels_before', set()))
+        label_names = outputs.label_names
+        image_urls = outputs.image_urls
+        missing = outputs.missing
         logger.info(
             f'{task_name}: labels {sorted(label_names)}, images {image_urls}, '
             f'missing {missing}'
@@ -629,7 +447,13 @@ class TasksQWidget(QWidget):
 
         shown = []
         not_loaded = []
-        if label_names:
+        if outputs.input_rewritten:
+            # The open layers of the input still show the old data
+            added = self._reload_image(path_to_zarr, label_names)
+            shown += added
+            not_loaded += [f"label '{n}' from {path_to_zarr}"
+                           for n in sorted(label_names) if n not in added]
+        elif label_names:
             added = self._load_zarr_layers(path_to_zarr, labels=label_names)
             shown += added
             not_loaded += [f"label '{n}' from {path_to_zarr}"
@@ -654,13 +478,17 @@ class TasksQWidget(QWidget):
 
         self._update_execute_buttons(is_enabled=True)
 
-    def _load_zarr_layers(self, zarr_url, labels=None, suffix=None):
+    def _load_zarr_layers(self, zarr_url, labels=None, suffix=None,
+                          images=None):
         """
         Add layers of an OME-Zarr image to the viewer.
 
-        labels: only add these label layers (and no image layers).
-        suffix: add everything, naming layers "<name> [<suffix>]".
+        labels: only add these label layers (default: all of them).
+        images: add the image layers (default: when no labels are given).
+        suffix: name layers "<name> [<suffix>]".
         """
+        if images is None:
+            images = labels is None
         reader = napari_get_reader(zarr_url)
         if reader is None:
             logger.warning(f'Cannot read {zarr_url}')
@@ -672,9 +500,11 @@ class TasksQWidget(QWidget):
             layer_type = layer_data[2] if len(layer_data) > 2 else 'image'
             if layer_type == 'labels':
                 meta['name'] = _label_name(meta.get('name'))
-            if labels is not None:
-                if layer_type != 'labels' or meta.get('name') not in labels:
+            if layer_type == 'labels':
+                if labels is not None and meta.get('name') not in labels:
                     continue
+            elif not images:
+                continue
 
             # Names may be a list (one per channel)
             names = meta.get('name')
@@ -685,12 +515,14 @@ class TasksQWidget(QWidget):
                     names = f'{names} [{suffix}]'
                 meta['name'] = names
 
-            # Replace stale layers with the same name(s); label layers may
-            # have been opened under their path name
+            # Replace stale layers with the same name(s) of this image;
+            # label layers may have been opened under their path name
             for n in names if isinstance(names, (list, tuple)) else [names]:
                 if n is None:
                     continue
                 for layer in list(self._viewer.layers):
+                    if _from_other_image(layer, zarr_url):
+                        continue
                     if layer.name == n or (
                         layer_type == 'labels'
                         and isinstance(layer, napari.layers.Labels)
@@ -706,6 +538,30 @@ class TasksQWidget(QWidget):
                 # Lets the layer be used as input for the next task
                 layer.metadata['zarr_url'] = zarr_url
                 added.append(layer.name)
+        return added
+
+    def _reload_image(self, zarr_url, labels=()):
+        """Read an image again that a task rewrote in place (e.g. Apply
+        Registration to Image with overwrite_input): replace its image
+        layers and its open label layers, and add the label layers in
+        ``labels``. Returns the names of the added layers."""
+        old = [layer for layer in self._viewer.layers
+               if [os.path.normpath(u) for u in layer_image_urls(layer)]
+               == [os.path.normpath(zarr_url)]]
+        open_labels = {_label_name(_without_napari_suffix(layer.name))
+                       for layer in old
+                       if isinstance(layer, napari.layers.Labels)}
+        was_selected = self._image_layers.currentText() in {
+            layer.name for layer in old}
+        for layer in old:
+            self._viewer.layers.remove(layer)
+        added = self._load_zarr_layers(
+            zarr_url, labels=open_labels | set(labels), images=True)
+        if was_selected:
+            for name in added:
+                if isinstance(self._viewer.layers[name], napari.layers.Image):
+                    self._image_layers.setCurrentText(name)
+                    break
         return added
 
     def _update_execute_buttons(self, is_enabled=True):
@@ -759,7 +615,7 @@ class TasksQWidget(QWidget):
 
         # Kept to find the task's outputs after the run
         ui['args'] = args_np if kind == 'non_parallel' else args_p
-        ui['labels_before'] = {u: set(_list_labels(u)) for u in zarr_urls}
+        ui['labels_before'] = {u: set(list_labels(u)) for u in zarr_urls}
 
         package_name = self.task_manager.get_package_name(task_name)
         entry = self.loaded_packages[package_name]
@@ -768,13 +624,11 @@ class TasksQWidget(QWidget):
         except FileNotFoundError as e:
             show_error(str(e))
             return
-        frozen = ['--frozen'] if entry.get('pixi_frozen') else []
         run_dir = self.task_manager.get_run_dir(task_name)
         run_dir.mkdir(parents=True, exist_ok=True)
         job = TaskJob(
             kind=kind,
-            run_prefix=[pixi, 'run', *frozen, '--manifest-path',
-                        entry['pixi_manifest_path'], 'python'],
+            run_prefix=pixi_run_prefix(pixi, entry),
             executable_parallel=self.task_manager.get_executable_path(task_name, 'parallel'),
             executable_non_parallel=self.task_manager.get_executable_path(task_name, 'non_parallel'),
             zarr_urls=zarr_urls,
@@ -843,22 +697,19 @@ class TasksQWidget(QWidget):
         many = len(inputs) > 1
         props = self.task_manager.get_properties(task_name)
 
+        rewritten = rewritten_inputs(result.image_list_updates, inputs)
         shown = []
         for url in inputs:
-            on_disk = set(_list_labels(url))
-            names = on_disk - before.get(url, set())
-            names |= on_disk & set(expected_label_names(
-                {**ui.get('args', {}), 'zarr_url': url}, props))
-            if names:
+            names = new_label_names(
+                url, before.get(url, set()), ui.get('args', {}), props)
+            if url in rewritten:
+                # The open layers of this input still show the old data
+                shown += self._reload_image(url, names)
+            elif names:
                 shown += self._load_zarr_layers(
                     url, labels=names, suffix=short_name(url) if many else None)
 
-        input_set = {os.path.normpath(u) for u in inputs}
-        new_urls = []
-        for update in result.image_list_updates:
-            url = update.get('zarr_url')
-            if url and os.path.normpath(url) not in input_set and url not in new_urls:
-                new_urls.append(url)
+        new_urls = new_image_urls(result.image_list_updates, inputs)
         for url in new_urls[: self.MAX_IMAGES_TO_OPEN]:
             shown += self._load_zarr_layers(url, suffix=short_name(url))
 
@@ -889,31 +740,24 @@ class TasksQWidget(QWidget):
         # Kept to find the task's outputs after the run
         ui['args'] = args
 
-        self.task_manager.get_run_dir(task_name).mkdir(parents=True, exist_ok=True)
-        path_to_task_args = self.task_manager.get_path_to_json(task_name)
-        with open(path_to_task_args, 'w') as f:
-            json.dump(args, f, indent=1)
-        out_json = self.task_manager.get_out_json_path(task_name)
-        if os.path.exists(out_json):
-            os.remove(out_json)
+        path_to_task_args, out_json = self.task_manager.write_args(
+            task_name, args)
 
         # Remember existing labels so new ones can be shown after the run
-        ui['labels_before'] = set(_list_labels(path_to_zarr))
+        ui['labels_before'] = set(list_labels(path_to_zarr))
 
         package_name = self.task_manager.get_package_name(task_name)
-        manifest_path = self.loaded_packages[package_name]['pixi_manifest_path']
+        entry = self.loaded_packages[package_name]
         try:
             pixi = find_pixi()
         except FileNotFoundError as e:
             show_error(str(e))
             return
-        entry = self.loaded_packages[package_name]
-        frozen = ['--frozen'] if entry.get('pixi_frozen') else []
-        cmd = [
-            pixi, 'run', *frozen, '--manifest-path', manifest_path,
-            'python', self.task_manager.get_executable_path(task_name),
-            '--args-json', path_to_task_args, '--out-json', out_json,
-        ]
+        cmd = task_command(
+            pixi_run_prefix(pixi, entry),
+            self.task_manager.get_executable_path(task_name),
+            path_to_task_args, out_json,
+        )
 
         self._update_execute_buttons(is_enabled=False)
         ui['log'].clear()
@@ -924,7 +768,7 @@ class TasksQWidget(QWidget):
 
         # Errors are handled in _on_task_finished; without _ignore_errors
         # napari re-raises them in the main thread (which aborts with PyQt5)
-        worker = create_worker(_stream_process, cmd, _ignore_errors=True)
+        worker = create_worker(stream_process, cmd, _ignore_errors=True)
         worker.yielded.connect(ui['log'].appendPlainText)
         worker.returned.connect(lambda rc: self._on_task_finished(task_name, rc))
         worker.errored.connect(lambda e: self._on_task_finished(task_name, -1, e))
@@ -970,7 +814,7 @@ class TasksQWidget(QWidget):
         urls = urls or [u for u in [self._selected_zarr_url()] if u]
         labels = []
         for url in urls:
-            labels += [c for c in _channel_labels(url) if c not in labels]
+            labels += [c for c in channel_labels(url) if c not in labels]
         current = self._image_layers.currentText()
         if current and current not in labels:
             labels.append(current)
@@ -978,12 +822,7 @@ class TasksQWidget(QWidget):
 
     def _add_task_tab(self, task_name):
         task = self.task_manager.get_task(task_name)
-        schema = {
-            "type": "object",
-            "properties": task["properties"],
-            "required": task.get("required") or [],
-            "$defs": task.get("defs") or {},
-        }
+        schema = self.task_manager.get_schema(task_name)
 
         page = QWidget(objectName=task_name)
         outer = QVBoxLayout(page)
@@ -999,14 +838,7 @@ class TasksQWidget(QWidget):
         outer.addWidget(subtitle)
         docs = (task.get('docs_info') or '').strip()
         if docs:
-            paragraphs = [p.strip() for p in docs.split('\n\n')]
-            lines = [ln for ln in '\n'.join(paragraphs).splitlines()
-                     if ln.strip() and not ln.lstrip().startswith('#')]
-            first = ' '.join(
-                re.sub(r'^\s*[-*]\s+', '', ln) for ln in lines[:3]
-            ).strip()
-            first = re.sub(r'(\*\*|__|`)', '', first)
-            docs_label = QLabel(first[:300] + ('…' if len(first) > 300 else ''))
+            docs_label = QLabel(docs_summary(docs))
             docs_label.setWordWrap(True)
             docs_label.setToolTip(docs[:3000])
             outer.addWidget(docs_label)
@@ -1077,13 +909,13 @@ class TasksQWidget(QWidget):
         autofills = []
 
         def _make_form(s):
-            f = SchemaForm(_with_defs(s), suggestions=suggestions)
+            f = SchemaForm(with_defs(s), suggestions=suggestions)
             autofills.append(ChannelAutofill(f.fields))
             return f
 
         def _update_channel(*_):
             url = self._selected_zarr_url()
-            labels = _channel_labels(url) if url else []
+            labels = channel_labels(url) if url else []
             channel = _input_channel(self._image_layers.currentText(), labels)
             for autofill in autofills:
                 autofill.set_channel(channel)
@@ -1192,10 +1024,6 @@ class TasksQWidget(QWidget):
                 self.tab_container.removeTab(idx)
             ui['page'].deleteLater()
 
-    def _get_json_params(self, path_to_json):
-        with open(path_to_json) as f:
-            return json.load(f)
-
     def _add_shapes_layer(self):
         """Add Shapes layer to napari viewer for ROI selection."""
         shapes_layer = Shapes(name="ROI selection", shape_type='polygon')
@@ -1245,19 +1073,13 @@ class TasksQWidget(QWidget):
             logger.warning("Multiple Shapes layers detected. Using the most recent one.")
         shapes_layer = shapes_layers[0]
 
-        # Create ROIs from shape layer polygons
-        cropped_rois = []
-        for roi_id, polygon_array in enumerate(shapes_layer.data):
-            polygon_array = np.array(polygon_array)
-            crop_roi = create_roi_from_bbox(polygon_array, roi_id=roi_id+1)
-            cropped_rois.append(crop_roi)
-
-        # Save to table
-        ome_zarr = open_ome_zarr_container(image_layer.source.path)
-        roi_table_crops = RoiTable(rois=cropped_rois)
-        ome_zarr.add_table(table_name, roi_table_crops, overwrite=overwrite)
+        # Create ROIs from shape layer polygons and save them to a table
+        write_roi_table(image_layer.source.path, shapes_layer.data,
+                        table_name, overwrite=overwrite)
 
         # Just for testing
+        # ome_zarr = open_ome_zarr_container(image_layer.source.path)
+        # roi_table_crops = ome_zarr.get_roi_table(table_name)
         # imgs = ome_zarr.get_image("0")
         # pixel_sizes = imgs.pixel_size.zyx
         # for roi in roi_table_crops.rois():

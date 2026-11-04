@@ -1,7 +1,7 @@
 """
 Local caches that make (re-)installing task environments fast.
 
-No Qt and no third-party dependencies; used by ``catalog.install_version``.
+No Qt and no third-party dependencies; used by ``install.install_version``.
 
 Three layers:
 

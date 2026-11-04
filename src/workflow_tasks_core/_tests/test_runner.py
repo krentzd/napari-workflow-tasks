@@ -5,14 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from napari_workflow_tasks._runner import (
+from workflow_tasks_core.manifests import task_kind
+from workflow_tasks_core.runner import (
     TaskFailed,
     TaskJob,
     default_zarr_dir,
     image_urls,
+    pixi_run_prefix,
     run_task_job,
     short_name,
-    task_kind,
+    stream_process,
 )
 
 SCRIPT = r"""
@@ -134,3 +136,41 @@ def test_task_kind():
     assert task_kind({"executable_non_parallel": "b",
                       "args_schema_non_parallel": {"properties": {"zarr_dir": {}}}}) == "converter_non_parallel"
     assert task_kind({**compound, "type": "converter_compound"}) == "converter_compound"
+
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+
+def test_pixi_run_prefix():
+    entry = {"pixi_manifest_path": "/env/pixi.toml"}
+    assert pixi_run_prefix("pixi", entry) == [
+        "pixi", "run", "--manifest-path", "/env/pixi.toml", "python"]
+    entry["pixi_frozen"] = True
+    assert pixi_run_prefix("pixi", entry) == [
+        "pixi", "run", "--frozen", "--manifest-path", "/env/pixi.toml",
+        "python"]
+
+
+def test_stream_process_returns_exit_code():
+    gen = stream_process([sys.executable, "-c",
+                          "print('a'); print('b'); raise SystemExit(3)"])
+    lines = []
+    while True:
+        try:
+            lines.append(next(gen))
+        except StopIteration as stop:
+            returncode = stop.value
+            break
+    assert lines == ["a", "b"]
+    assert returncode == 3
+
+
+def test_failure_carries_partial_result(scripts):
+    job = _job(scripts, "parallel", stop_on_error=True)
+    job.executable_parallel = str(scripts / "fail.py")
+    with pytest.raises(TaskFailed) as info:
+        _run(job)
+    assert info.value.result.failed == ["/d/p.zarr/B/03/0"]
+    assert info.value.result.processed_zarr_urls == []

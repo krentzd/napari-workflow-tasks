@@ -48,60 +48,16 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-# Arguments injected by the launcher (Fractal "reserved" arguments)
-RESERVED_ARGS = {"zarr_url", "zarr_urls", "zarr_dir", "init_args"}
+from workflow_tasks_core.schema import (
+    RESERVED_ARGS,
+    SchemaError,
+    is_null,
+    resolve,
+    schema_type,
+    schema_variants,
+)
 
 _NO_VALUE = object()  # field has no value: omit the argument
-
-
-class SchemaError(ValueError):
-    """Invalid value in a field; ``.path`` names the field."""
-
-    def __init__(self, path: str, message: str):
-        super().__init__(f"{path}: {message}")
-        self.path = path
-
-
-# --------------------------------------------------------------------------
-# Schema helpers
-# --------------------------------------------------------------------------
-
-
-def resolve(schema: dict, defs: dict) -> dict:
-    """Follow ``$ref`` (and single-item ``allOf``), keeping local keys such
-    as title/description/default from the referencing schema."""
-    schema = dict(schema)
-    seen = set()
-    while True:
-        if "$ref" in schema:
-            ref = schema.pop("$ref")
-            if ref in seen:
-                break
-            seen.add(ref)
-            target = defs.get(ref.split("/")[-1], {})
-            schema = {**target, **schema}
-        elif "allOf" in schema and len(schema["allOf"]) == 1:
-            sub = schema.pop("allOf")[0]
-            schema = {**sub, **schema}
-        else:
-            break
-    return schema
-
-
-def _variants(schema: dict) -> list[dict]:
-    return schema.get("oneOf") or schema.get("anyOf") or []
-
-
-def _is_null(schema: dict) -> bool:
-    return schema.get("type") == "null"
-
-
-def _type(schema: dict) -> Optional[str]:
-    t = schema.get("type")
-    if isinstance(t, list):
-        non_null = [x for x in t if x != "null"]
-        return non_null[0] if len(non_null) == 1 else None
-    return t
 
 
 # --------------------------------------------------------------------------
@@ -245,7 +201,7 @@ class NumberField(Field):
 
     def __init__(self, schema, path, required, parent=None):
         super().__init__(schema, path, required, parent)
-        self.is_int = _type(schema) == "integer"
+        self.is_int = schema_type(schema) == "integer"
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
 
@@ -349,7 +305,7 @@ class ListField(Field):
     def __init__(self, schema, path, required, defs, parent=None, suggestions=None):
         super().__init__(schema, path, required, parent)
         item = resolve(schema.get("items", {}), defs)
-        self.item_type = _type(item) or "string"
+        self.item_type = schema_type(item) or "string"
         self.item_pattern = item.get("pattern")
         self.edit = QLineEdit()
         hint = "comma separated" if not self.item_pattern else "JSON list or comma separated"
@@ -729,7 +685,7 @@ class UnionField(Field):
         self.combo.setFocusPolicy(Qt.StrongFocus)
         self.fields: list[Field] = []
         self._labels: list[Any] = []
-        for i, variant in enumerate(_variants(schema)):
+        for i, variant in enumerate(schema_variants(schema)):
             sub = resolve(variant, defs)
             label = ref_to_label.get(variant.get("$ref"))
             if label is None and disc:
@@ -800,9 +756,9 @@ def build_field(
     key = path.split(".")[-1]
     hints = (suggestions or {}).get(key)
 
-    variants = _variants(schema)
+    variants = schema_variants(schema)
     if variants:
-        non_null = [v for v in variants if not _is_null(v)]
+        non_null = [v for v in variants if not is_null(v)]
         if len(non_null) < len(variants) and len(non_null) == 1:
             # Optional[X]
             inner_schema = {
@@ -834,7 +790,7 @@ def build_field(
     if "enum" in schema:
         return EnumField(schema, path, required)
 
-    t = _type(schema)
+    t = schema_type(schema)
     nullable = isinstance(schema.get("type"), list) and "null" in schema["type"]
     if t == "boolean":
         return BoolField(schema, path, required)
@@ -844,11 +800,11 @@ def build_field(
         return _nullable(StringField(schema, path, required, suggestions=hints), nullable)
     if t == "array":
         item = resolve(schema.get("items", {}), defs)
-        if _type(item) in ("string", "integer", "number", "boolean") and not _variants(item):
+        if schema_type(item) in ("string", "integer", "number", "boolean") and not schema_variants(item):
             return _nullable(
                 ListField(schema, path, required, defs, suggestions=hints), nullable
             )
-        if item.get("properties") or _variants(item):
+        if item.get("properties") or schema_variants(item):
             return ModelListField(schema, path, required, defs, suggestions=suggestions)
         return JsonField(schema, path, required)
     if t == "object" or "properties" in schema:
