@@ -9,10 +9,11 @@ version (read from that version's ``__FRACTAL_MANIFEST__.json``).
 from __future__ import annotations
 
 import logging
+import time
 
 from napari.qt.threading import create_worker
 from napari.utils.notifications import show_error, show_info, show_warning
-from qtpy.QtCore import QObject, Qt, Signal
+from qtpy.QtCore import QObject, Qt, QTimer, Signal
 from qtpy.QtGui import QBrush, QColor, QFont
 from qtpy.QtWidgets import (
     QCheckBox,
@@ -22,6 +23,7 @@ from qtpy.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -40,6 +42,33 @@ RUNNABLE_TYPES = ("parallel",)  # what the launcher can currently execute
 
 class _LogEmitter(QObject):
     line = Signal(str)
+
+
+# Install log line prefix -> the step shown in the progress bar
+INSTALL_STEPS = (
+    (("Looking for pixi.lock", "Using the cached", "Could not download"),
+     "Downloading the package source"),
+    (("Installing", "Solving", "Install with Python"),
+     "Installing dependencies (this can take several minutes)"),
+    (("Caching the environment", "Native-library"),
+     "Caching the environment"),
+    (("Checking that the tasks import", "Import check"),
+     "Checking that the tasks import"),
+)
+
+
+def install_step(line: str):
+    """The progress step an install log line starts, or None."""
+    line = line.strip()
+    for prefixes, step in INSTALL_STEPS:
+        if line.startswith(prefixes):
+            return step
+    return None
+
+
+def _format_elapsed(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    return f"{m}m {s:02d}s" if m else f"{s}s"
 
 
 PINS_TOOLTIP = (
@@ -149,14 +178,62 @@ class CatalogPanel(QGroupBox):
         layout.addWidget(self.lock_check)
 
         # Install
-        self.install_btn = QPushButton("Install && add task")
+        self.install_btn = QPushButton("Install task")
         self.install_btn.setEnabled(False)
         self.install_btn.clicked.connect(self._install_selected)
         layout.addWidget(self.install_btn)
 
+        # Busy indicator for slow steps (loading, installing, caching)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        self.progress.setMaximumHeight(8)
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+
         self.status = QLabel("Click “Load catalog” to list all Fractal tasks.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+
+        # Latest install output line, under the step
+        self.detail = QLabel("")
+        self.detail.setStyleSheet("color: gray;")
+        self.detail.setWordWrap(True)
+        self.detail.setVisible(False)
+        layout.addWidget(self.detail)
+
+        self._step = ""
+        self._busy_since = None
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setInterval(1000)
+        self._busy_timer.timeout.connect(self._show_step)
+
+    # ------------------------------------------------------------------
+    # Progress
+    # ------------------------------------------------------------------
+
+    def _start_busy(self, step: str):
+        self._busy_since = time.monotonic()
+        self.progress.setVisible(True)
+        self.detail.setText("")
+        self._set_step(step)
+        self._busy_timer.start()
+
+    def _set_step(self, step: str):
+        self._step = step
+        self._show_step()
+
+    def _show_step(self):
+        if self._busy_since is None:
+            return
+        elapsed = _format_elapsed(time.monotonic() - self._busy_since)
+        self.status.setText(f"{self._step}… ({elapsed})")
+
+    def _stop_busy(self):
+        self._busy_timer.stop()
+        self._busy_since = None
+        self.progress.setVisible(False)
+        self.detail.setVisible(False)
 
     # ------------------------------------------------------------------
     # Loading the catalog
@@ -169,7 +246,7 @@ class CatalogPanel(QGroupBox):
         self._combos.clear()
         self._infos.clear()
         self.refresh_btn.setEnabled(False)
-        self.status.setText("Fetching task packages…")
+        self._start_busy("Fetching task packages")
         self._n_errors = 0
         self._rate_limit_msg = None
         self._snapshot_at = None
@@ -190,7 +267,7 @@ class CatalogPanel(QGroupBox):
         if kind == "error" and payload[0] == "catalog snapshot":
             # Not fatal: iter_catalog falls back to querying live
             logger.warning(f"Catalog snapshot {payload[1]}")
-            self.status.setText("Catalog snapshot unavailable, querying live…")
+            self._set_step("Catalog snapshot unavailable, querying live")
             return
         if kind == "error":
             source, msg = payload
@@ -206,9 +283,10 @@ class CatalogPanel(QGroupBox):
         if info is not None:
             self._infos[(pkg.pkg_name, pkg.default_version.version)] = info
         self._add_package_row(pkg)
-        self.status.setText(f"Loaded {len(self._packages)} packages…")
+        self._set_step(f"Loaded {len(self._packages)} packages")
 
     def _on_catalog_done(self):
+        self._stop_busy()
         self.refresh_btn.setEnabled(True)
         self.refresh_btn.setText("Refresh")
         n_tasks = sum(
@@ -443,9 +521,9 @@ class CatalogPanel(QGroupBox):
 
         self.install_btn.setEnabled(False)
         self.refresh_btn.setEnabled(False)
-        self.status.setText(
-            f"Installing {pkg_name}=={version} (this can take a few minutes)…"
-        )
+        self._install_label = f"{pkg_name}=={version}"
+        self._start_busy(f"Preparing {self._install_label}")
+        self.detail.setVisible(True)
 
         emitter = _LogEmitter()
         emitter.line.connect(self._on_install_log)
@@ -455,6 +533,7 @@ class CatalogPanel(QGroupBox):
                 pkg, version, extras=extras, log=emitter.line.emit, pins=pins,
                 use_lock=use_lock,
             )
+            emitter.line.emit("Reading the task list")
             return catalog.get_version_info(pkg, version), entry
 
         worker = create_worker(_install)
@@ -464,6 +543,7 @@ class CatalogPanel(QGroupBox):
             )
         )
         worker.errored.connect(self._on_worker_error)
+        worker.finished.connect(self._stop_busy)
         worker.finished.connect(lambda: self.refresh_btn.setEnabled(True))
         worker.finished.connect(self._on_selection_changed)
         worker._emitter = emitter  # keep alive
@@ -471,10 +551,17 @@ class CatalogPanel(QGroupBox):
 
     def _on_install_log(self, line: str):
         logger.info(line)
-        if line.strip():
-            self.status.setText(line[:200])
+        if not line.strip():
+            return
+        step = install_step(line)
+        if line.startswith("Reading the task list"):
+            step = "Reading the task list"
+        if step:
+            self._set_step(f"{step}: {self._install_label}")
+        self.detail.setText(line.strip()[:200])
 
     def _on_installed(self, pkg, version, info, entry, task_name):
+        self._stop_busy()
         combo = self._combos.get(pkg.pkg_name)
         if combo is not None:
             idx = combo.findData(version)

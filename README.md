@@ -38,17 +38,11 @@ Open an OME-Zarr image in napari and choose the **napari-ome-zarr** reader when 
 
 <img width="407" alt="open_plugin" src="https://github.com/user-attachments/assets/e0f92a32-e234-41ad-ab92-e9c9937100e6" />
 
-### 3. Add a task package
+### 3. Install a task package
 
-Click **Add task package** and pick the package's source archive (`.tar.gz`, e.g. a task package's sdist from PyPI). The archive must unpack into a folder with the same name as the archive (as sdists do). The plugin then:
+In the task catalog, click **Load catalog**, find a task (search by task, package or category) and pick a version, then click **Install & add task**. The plugin downloads the package, creates its own pixi environment under `~/.napari_workflow_tasks/envs/` (set `NAPARI_WORKFLOW_TASKS_ROOT` to use another folder), checks that its tasks import, and opens the selected task in a tab.
 
-1. Extracts the archive to `~/.napari_workflow_tasks/<package-name>/`
-2. Reads `pyproject.toml` to find the package source and its `__FRACTAL_MANIFEST__.json`
-3. Sets up a pixi environment for the package:
-   - if `pyproject.toml` already contains a pixi configuration, the plugin uses it directly
-   - otherwise it creates a new environment in `~/.napari_workflow_tasks/pixi_envs/<package-name>/` and runs `pixi add` for the package (from conda-forge) and for `cellpose`
-
-Setting up the environment for the first time can take a while.
+Installing a package for the first time can take several minutes; later installs of the same version reuse the cached environment.
 
 ### 4. Pick and configure a task
 
@@ -60,7 +54,7 @@ Nested arguments (e.g. `channel` or Cellpose model parameters) get their own sub
 
 ### 5. Run the task
 
-Click **Execute task**. The plugin writes the parameters to `<task title>.json` next to the package's manifest and runs the task's executable in the package's pixi environment:
+Click **Execute task**. The plugin writes the parameters to `<task title>.json` in the task's own folder, `~/.napari_workflow_tasks/tasks/<package>/<version>/<task name>/`, and runs the task's executable in the package's pixi environment. The task's output file (`out_file.json`) goes to the same folder; both are overwritten on the next run of that task:
 
 ```bash
 pixi run --manifest-path <pixi manifest> python <executable> --args-json <task title>.json --out-json out_file.json

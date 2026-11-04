@@ -109,6 +109,9 @@ ROOT_DIR = Path(
 )
 CATALOG_CACHE_DIR = ROOT_DIR / "catalog"
 ENVS_DIR = ROOT_DIR / "envs"
+# Run files of each task (arguments JSON, --out-json):
+# TASKS_DIR / <package> / <version> / <task name>
+TASKS_DIR = ROOT_DIR / "tasks"
 # Install caches (see _env_cache): native-library store, install recipes,
 # source archives. None = ENVS_DIR.parent / "cache" (see cache_dir())
 CACHE_DIR: Optional[Path] = None
@@ -1025,6 +1028,18 @@ def system_requirements_toml(reqs: dict) -> str:
 
 def env_dir(pkg_name: str, version: str) -> Path:
     return ENVS_DIR / pkg_name / version
+
+
+def _safe_dir_name(name: str) -> str:
+    """Folder name for ``name``: path separators and characters Windows
+    does not allow become "_"."""
+    return re.sub(r'[\\/:*?"<>|]', "_", name).strip(" .") or "_"
+
+
+def task_run_dir(pkg_name: str, version: str, task_name: str) -> Path:
+    """Folder for the run files of one task of an installed package."""
+    return (TASKS_DIR / _safe_dir_name(pkg_name) / _safe_dir_name(version)
+            / _safe_dir_name(task_name))
 
 
 def _toml_list(items: list[str]) -> str:
@@ -2134,6 +2149,7 @@ def _finish_install(
                         "env_kind": kind, "versions": pinned,
                         "verified": bool(versions)}
     envs = manifest.parent / ".pixi" / "envs"
+    log("Caching the environment's native libraries")
     stats = _env_cache.dedup_tree(envs, native_store_dir(), log)
     log(stats.summary())
 
@@ -2161,6 +2177,7 @@ def _finish_install(
     if pkg_dir is None:
         _env_cache.clear_check(prefix)
         t0 = time.monotonic()
+        log("Checking that the tasks import")
         pkg_dir = check_env(pixi, manifest, info, log, frozen=frozen)
         log(f"Import check took {time.monotonic() - t0:.1f}s")
         record = {**expected, "ok": True, "pkg_dir": pkg_dir,
@@ -2481,9 +2498,8 @@ def install_version(
 ) -> dict:
     """
     Create/update the pixi env for (package, version), check that its task
-    modules import, and locate the installed package. Returns a dict
-    compatible with ``PackageImporter.loaded_packages`` entries
-    (``pixi_frozen``: run with ``pixi run --frozen``; ``env_kind``: one of
+    modules import, and locate the installed package. Returns the entry
+    stored in ``TasksQWidget.loaded_packages`` (``pixi_frozen``: run with ``pixi run --frozen``; ``env_kind``: one of
     "pixi.lock", "pixi config", "resolved").
 
     Order: a cached install recipe for exactly these inputs (``--frozen``),
