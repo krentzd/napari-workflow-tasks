@@ -2,14 +2,22 @@
 
 A [napari](https://napari.org/stable/index.html) plugin to install and run [Fractal](https://fractal-analytics-platform.github.io/) tasks locally on [OME-Zarr](https://ngff.openmicroscopy.org/) images. Tasks can either be installed from the [Fractal task catalog]( https://fractal-analytics-platform.github.io/fractal_tasks/) or from tarball files (`.tar.gz`). 
 
-![width=200](resources%2Fimages%2Fnapari-plugin-screenshot.png)
+![width=200](https://raw.githubusercontent.com/krentzd/napari-workflow-tasks/main/resources/images/napari-plugin-screenshot.png)
 
 
 
 ## Usage 
 
 ### Installation
-The napari-workflow-tasks plugin requires [pixi](https://pixi.prefix.dev/latest/). To install and run the plugin, open the terminal and run the following commands:
+The napari-workflow-tasks plugin requires [pixi](https://pixi.prefix.dev/latest/), which installs each task package in its own environment. Install pixi first; it is not installed together with the plugin.
+
+To add the plugin to an existing napari, install `napari-workflow-tasks` from napari's plugin manager (`Plugins > Install/Uninstall Plugins`) or with pip:
+
+```bash
+pip install napari-workflow-tasks
+```
+
+To run the plugin from its source code instead, open the terminal and run the following commands:
 
 ```bash
 git clone https://github.com/krentzd/napari-workflow-tasks
@@ -19,7 +27,7 @@ pixi run napari
 
 ### Running Fractal tasks
 
-[![Watch the video](resources%2Fimages%2Fvideo-screenshot.png)](https://youtu.be/Dy_UNt88HGA)
+[![Watch the video](https://raw.githubusercontent.com/krentzd/napari-workflow-tasks/main/resources/images/video-screenshot.png)](https://youtu.be/Dy_UNt88HGA)
 
 1. **Load task packages** either from the [Fractal task catalog]( https://fractal-analytics-platform.github.io/fractal_tasks/), or upload your own local task as a `.tar.gz` file by clicking on `Manage packages`.
 2. **Open an OME-Zarr file** using the [napari-ome-zarr](https://github.com/ome/napari-ome-zarr) plugin by drag-and-drop. 

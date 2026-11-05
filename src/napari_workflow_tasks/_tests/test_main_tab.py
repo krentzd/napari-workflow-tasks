@@ -10,7 +10,7 @@ pytest.importorskip("napari")
 from napari.components import ViewerModel  # noqa: E402
 from qtpy.QtCore import Qt  # noqa: E402
 
-from workflow_tasks_core import Package, install, paths  # noqa: E402
+from workflow_tasks_core import Package, install, paths, pixi_config  # noqa: E402
 from workflow_tasks_core._tests.test_local_package import (  # noqa: E402
     MANIFEST,
     PKG_INFO,
@@ -198,6 +198,7 @@ def test_remove_package(qtbot, fake_package, yes):
     with qtbot.waitSignal(panel.removed, timeout=10000):
         panel.remove_btn.click()
     assert not paths.env_dir("p", "1.0").exists()
+    assert paths.package_dir("p").is_dir()  # 0.9 is still installed
     assert _installed(panel) == ["p 0.9"]
     assert panel.status.text() == "Removed p 1.0."
     # its tab is closed; the other version is still listed
@@ -209,6 +210,7 @@ def test_remove_package(qtbot, fake_package, yes):
     with qtbot.waitSignal(panel.removed, timeout=10000):
         panel.remove_btn.click()
     assert _rows(widget) == {}
+    assert not paths.package_dir("p").exists()
     assert _installed(panel) == ["(no packages installed yet)"]
     widget._catalog_dialog.close()
 
@@ -226,4 +228,29 @@ def test_no_removal_while_a_task_runs(qtbot, fake_package):
     assert "while a task runs" in panel.remove_btn.toolTip()
     widget._set_running(False)
     assert panel.remove_btn.isEnabled()
+    widget._catalog_dialog.close()
+
+
+def test_missing_pixi_is_shown(qtbot, monkeypatch):
+    def no_pixi():
+        raise FileNotFoundError("no pixi")
+
+    monkeypatch.setattr(pixi_config, "find_pixi", no_pixi)
+    widget = TasksQWidget(ViewerModel())
+    qtbot.addWidget(widget)
+    widget.show_catalog()
+    for banner in (widget.pixi_warning, widget._catalog_dialog.panel.pixi_warning):
+        assert banner is not None and not banner.isHidden()
+        assert "pixi was not found" in banner.text()
+        assert "https://pixi.sh" in banner.text()
+    widget._catalog_dialog.close()
+
+
+def test_no_pixi_warning_when_pixi_is_found(qtbot, monkeypatch):
+    monkeypatch.setattr(pixi_config, "find_pixi", lambda: "/bin/pixi")
+    widget = TasksQWidget(ViewerModel())
+    qtbot.addWidget(widget)
+    widget.show_catalog()
+    assert widget.pixi_warning is None
+    assert widget._catalog_dialog.panel.pixi_warning is None
     widget._catalog_dialog.close()

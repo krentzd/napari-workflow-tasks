@@ -1045,6 +1045,9 @@ def installed_versions(pkg_name: str) -> list[str]:
     return sorted(versions, key=version_sort_key)
 
 
+# Files the OS may leave in a package's folder (macOS Finder)
+IGNORED_FILES = {".DS_Store"}
+
 # delete_env keeps native libraries orphaned less than this long, so that
 # re-installing a just-deleted env still finds them (seconds)
 PRUNE_UNUSED_FOR = 14 * 24 * 3600
@@ -1061,13 +1064,18 @@ def prune_native_store(unused_for: float = 0.0) -> dict:
 def delete_env(
     pkg_name: str, version: str, prune_unused_for: Optional[float] = None
 ) -> dict:
-    """Delete the env of (package, version), then prune native libraries
-    that no env has used for ``prune_unused_for`` seconds (default
-    PRUNE_UNUSED_FOR; 0 = all unused ones). Install recipes are kept, so a
-    re-install is a ``--frozen`` install. Returns the prune stats."""
+    """Delete the env of (package, version), and the package's folder when
+    no other version is left, then prune native libraries that no env has
+    used for ``prune_unused_for`` seconds (default PRUNE_UNUSED_FOR; 0 = all
+    unused ones). Install recipes are kept, so a re-install is a
+    ``--frozen`` install. Returns the prune stats."""
     d = env_dir(pkg_name, version)
     if d.exists():
         shutil.rmtree(d)
+    pkg_dir = package_dir(pkg_name)
+    if pkg_dir.is_dir() and all(
+            f.name in IGNORED_FILES for f in pkg_dir.iterdir()):
+        shutil.rmtree(pkg_dir)
     return prune_native_store(
         PRUNE_UNUSED_FOR if prune_unused_for is None else prune_unused_for
     )

@@ -59,7 +59,9 @@ def find_pixi() -> str:
         if candidate.exists():
             return str(candidate)
     raise FileNotFoundError(
-        "Could not find the `pixi` executable. Install it from https://pixi.sh"
+        "Could not find the `pixi` executable, which installs and runs task "
+        "packages. Install it from https://pixi.sh, then restart napari (or "
+        "your Python session)."
     )
 
 
