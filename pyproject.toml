@@ -1,18 +1,17 @@
 [project]
 name = "napari-workflow-tasks"
 dynamic = ["version"]
-description = "A plugin to interact with OME-Zarr tasks"
+description = "Install and run Fractal tasks on OME-Zarr images in napari"
 readme = "README.md"
-license = {file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
-  {name = "Daniel Krentzel"},
-  {email = "dkrentzel@pm.me"},
+  {name = "Daniel Krentzel", email = "dkrentzel@pm.me"},
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Framework :: napari",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
@@ -22,12 +21,12 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "numpy",
     "packaging",
     "qtpy",
-    "ngio",
+    "ngio>=0.4,<0.5",
     "napari",
     "napari-ome-zarr",
 ]
@@ -51,7 +50,7 @@ napari-workflow-tasks = "napari_workflow_tasks:napari.yaml"
 "User Support" = "https://github.com/krentzd/napari-workflow-tasks/issues"
 
 [build-system]
-requires = ["setuptools>=42.0.0", "wheel"]
+requires = ["setuptools>=77.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -129,7 +128,8 @@ napari = "*"
 napari-ome-zarr = "*"
 
 [tool.pixi.dependencies]
-pyqt = ">=5.15,<6"
+python = ">=3.11,<3.14"
+pyqt6 = ">=6.11,<7"
 
 [tool.pixi.environments]
 default = { solve-group = "default" }

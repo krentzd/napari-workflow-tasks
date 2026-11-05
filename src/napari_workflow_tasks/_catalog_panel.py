@@ -41,7 +41,14 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from workflow_tasks_core import Catalog, Package, install, manifests, snapshot
+from workflow_tasks_core import (
+    Catalog,
+    Package,
+    install,
+    manifests,
+    pixi_config,
+    snapshot,
+)
 from workflow_tasks_core.manifests import VersionInfo, task_kind
 from workflow_tasks_core.progress import format_elapsed, install_step
 from workflow_tasks_core.runner import RUNNABLE_KINDS
@@ -50,6 +57,29 @@ from workflow_tasks_core.task_packages import TaskPackage
 logger = logging.getLogger(__name__)
 
 ROLE = Qt.UserRole
+
+
+PIXI_MISSING = (
+    "<b>pixi was not found.</b> Task packages can't be installed or run "
+    "without it. Install pixi from <a href='https://pixi.sh'>pixi.sh</a>, "
+    "then restart napari.")
+
+
+def pixi_warning() -> QLabel | None:
+    """A banner saying that pixi is missing, or None when pixi is found."""
+    try:
+        pixi_config.find_pixi()
+    except FileNotFoundError:
+        pass
+    else:
+        return None
+    label = QLabel(PIXI_MISSING)
+    label.setWordWrap(True)
+    label.setOpenExternalLinks(True)
+    label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+    label.setStyleSheet("QLabel { border: 1px solid #e0a800; "
+                        "border-radius: 4px; padding: 6px; }")
+    return label
 
 
 class _LogEmitter(QObject):
@@ -124,6 +154,9 @@ class CatalogPanel(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        self.pixi_warning = pixi_warning()
+        if self.pixi_warning is not None:
+            outer.addWidget(self.pixi_warning)
 
         # Installed packages: remove the ones not needed any more
         installed_box = QGroupBox("Installed packages")

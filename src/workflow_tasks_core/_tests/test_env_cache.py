@@ -141,6 +141,21 @@ def test_delete_env_prunes(tmp_path, monkeypatch):
     assert install.prune_native_store()["removed"] == 1
 
 
+def test_delete_env_removes_the_empty_package_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "ENVS_DIR", tmp_path / "envs")
+    monkeypatch.setattr(paths, "CACHE_DIR", tmp_path / "cache")
+    for version in ("1", "2"):
+        (paths.env_dir("p", version) / ".pixi").mkdir(parents=True)
+    (paths.package_dir("p") / ".DS_Store").write_text("")
+    install.delete_env("p", "1")
+    assert [d.name for d in paths.package_dir("p").iterdir()
+            if d.is_dir()] == ["2"]  # another version is left
+    install.delete_env("p", "2")
+    assert not paths.package_dir("p").exists()
+    assert (tmp_path / "envs").is_dir()
+    install.delete_env("p", "2")  # nothing left to delete
+
+
 # --------------------------------------------------------------------------
 # Recipes
 # --------------------------------------------------------------------------

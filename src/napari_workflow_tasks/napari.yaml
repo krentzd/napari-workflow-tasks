@@ -1,14 +1,14 @@
 name: napari-workflow-tasks
-display_name: Napari workflow tasks
+display_name: Fractal Task Launcher
 # use 'hidden' to remove plugin from napari hub search results
 visibility: public
 # see https://napari.org/stable/plugins/manifest.html for valid categories
-categories: ["Annotation", "Segmentation", "Acquisition"]
+categories: ["Image Processing", "Segmentation", "Utilities"]
 contributions:
   commands:
     - id: napari-workflow-tasks.make_qwidget
       python_name: napari_workflow_tasks:TasksQWidget
-      title: Make example QWidget
+      title: Open the Fractal Task Launcher
   widgets:
     - command: napari-workflow-tasks.make_qwidget
-      display_name: Napari Fractal Task
+      display_name: Fractal Task Launcher

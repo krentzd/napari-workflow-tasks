@@ -22,7 +22,7 @@ from workflow_tasks_core import Catalog, Package
 from workflow_tasks_core.runner import RUNNABLE_KINDS
 from workflow_tasks_core.task_packages import version_sort_key
 
-from ._catalog_panel import CatalogDialog
+from ._catalog_panel import CatalogDialog, pixi_warning
 from ._task_tab import TaskTab
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,10 @@ class TasksQWidget(QWidget):
         top_row.addStretch(1)
         top_row.addWidget(manage_button)
         packages_layout.addLayout(top_row)
+
+        self.pixi_warning = pixi_warning()
+        if self.pixi_warning is not None:
+            packages_layout.addWidget(self.pixi_warning)
 
         self.task_tree = QTreeWidget()
         self.task_tree.setHeaderLabels(["Task", "Version", "Type"])
