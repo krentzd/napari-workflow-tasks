@@ -85,3 +85,17 @@ venv/
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Claude Code (AI assistant): settings, skills, notes
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+*-SKILL.md
+
+# Output of task runs
+out-json-file.json
