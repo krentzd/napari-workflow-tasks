@@ -31,8 +31,13 @@ TASKS_DIR = ROOT_DIR / "tasks"
 CACHE_DIR: Optional[Path] = None
 
 
+def package_dir(pkg_name: str) -> Path:
+    """Folder holding the environments of every version of a package."""
+    return ENVS_DIR / pkg_name
+
+
 def env_dir(pkg_name: str, version: str) -> Path:
-    return ENVS_DIR / pkg_name / version
+    return package_dir(pkg_name) / version
 
 
 def _safe_dir_name(name: str) -> str:

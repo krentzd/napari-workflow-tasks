@@ -11,6 +11,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
+import tarfile
 import urllib.request
 import zipfile
 from dataclasses import asdict, dataclass
@@ -232,11 +234,38 @@ def read_wheel_info(wheel_path, name: str = "") -> VersionInfo:
     )
 
 
+def read_sdist_info(path) -> VersionInfo:
+    """Manifest and metadata of a source archive (``.tar.gz``)."""
+    meta = task_packages.sdist_metadata(path)
+    with tarfile.open(path, "r:gz") as tar:
+        member = next((m for m in tar.getmembers()
+                       if m.name.endswith("/__FRACTAL_MANIFEST__.json")), None)
+        if member is None:
+            raise ValueError(
+                f"{os.path.basename(str(path))} has no __FRACTAL_MANIFEST__.json")
+        manifest = json.loads(tar.extractfile(member).read())
+    # Its path in the installed package: without the archive's top folder
+    # and the src/ folder of src layouts
+    manifest_relpath = member.name.split("/", 1)[1]
+    if manifest_relpath.startswith("src/"):
+        manifest_relpath = manifest_relpath[len("src/"):]
+    return VersionInfo(
+        manifest=manifest,
+        module_name=os.path.dirname(manifest_relpath).replace("/", "."),
+        manifest_relpath=manifest_relpath,
+        extras=meta["extras"],
+        requires_python=meta["requires_python"],
+    )
+
+
 def get_version_info(pkg: TaskPackage, version: str) -> VersionInfo:
     """
     Full manifest + metadata for one version. Order: local cache, snapshot
     manifest file, the wheel itself (only manifest/METADATA bytes).
     """
+    if pkg.kind == task_packages.LOCAL:
+        # Not cached: the archive may be rebuilt under the same name
+        return read_sdist_info(pkg.source)
     cache = _cache_path(pkg.pkg_name, version)
     if cache.exists():
         return VersionInfo(**json.loads(cache.read_text()))
@@ -272,3 +301,16 @@ def get_display_info(pkg: TaskPackage, version: str) -> VersionInfo:
         extras=summary.get("extras", []),
         requires_python=summary.get("requires_python"),
     )
+
+
+def docs_summary(docs: str) -> str:
+    """The first lines of a task's ``docs_info`` as one short plain-text
+    paragraph (headings and Markdown emphasis removed)."""
+    paragraphs = [p.strip() for p in docs.split('\n\n')]
+    lines = [ln for ln in '\n'.join(paragraphs).splitlines()
+             if ln.strip() and not ln.lstrip().startswith('#')]
+    first = ' '.join(
+        re.sub(r'^\s*[-*]\s+', '', ln) for ln in lines[:3]
+    ).strip()
+    first = re.sub(r'(\*\*|__|`)', '', first)
+    return first[:300] + ('…' if len(first) > 300 else '')

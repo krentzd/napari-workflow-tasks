@@ -28,7 +28,13 @@ from urllib.parse import urlparse
 # through their module, so that the replacement is seen here.
 from . import env_cache, manifests, pixi_config, task_packages
 from .manifests import VersionInfo
-from .paths import cache_dir, env_dir, native_store_dir, recipes_dir
+from .paths import (
+    cache_dir,
+    env_dir,
+    native_store_dir,
+    package_dir,
+    recipes_dir,
+)
 from .pixi_config import (
     check_pins_against_lock,
     lock_platforms,
@@ -57,6 +63,7 @@ from .task_packages import (
     has_pixi_lock,
     is_tag_archive,
     normalize_package_name,
+    version_sort_key,
 )
 
 
@@ -318,7 +325,10 @@ ENV_RESOLVED = "resolved"  # (c) generated pixi.toml with the wheel
 
 def _fetch_source(url: str, log: Callable[[str], None]) -> bytes:
     """The source archive, from the local cache or downloaded into it
-    (releases are immutable)."""
+    (releases are immutable). An archive on this computer is read as it
+    is now (it may have been rebuilt)."""
+    if url.startswith("file:"):
+        return task_packages.http_get(url)
     name = os.path.basename(urlparse(url).path) or "source.tar.gz"
     d = cache_dir() / "sources" / env_cache.text_sha256(url)[:16]
     archive = d / name
@@ -809,13 +819,17 @@ def install_recipe_key(
 ) -> str:
     """Key of the install recipe: everything that decides what gets
     installed. (The release is identified by the catalog's wheel URL, so
-    computing the key needs no network.) The pixi version also decides the
-    manifest syntax (use_rich_platforms)."""
+    computing the key needs no network; an archive on this computer also
+    by its content, as it may be rebuilt under the same name.) The pixi
+    version also decides the manifest syntax (use_rich_platforms)."""
     pv = pkg.get_version(version)
+    source = pv.wheel_url
+    if pkg.kind == task_packages.LOCAL:
+        source += "#sha256=" + env_cache.file_sha256(pkg.source)
     return env_cache.recipe_key({
         "pkg": pkg.pkg_name,
         "version": version,
-        "source": pv.wheel_url,
+        "source": source,
         "platform": pixi_config.current_pixi_platform(),
         "system_requirements": sysreqs,
         "pins": parse_pins(pins),
@@ -1019,6 +1033,16 @@ def is_installed(pkg_name: str, version: str) -> bool:
         return True
     src = d / SOURCE_SUBDIR
     return src.exists() and any(src.glob("*/.pixi/envs"))
+
+
+def installed_versions(pkg_name: str) -> list[str]:
+    """The installed versions of a package, oldest first."""
+    pkg_dir = package_dir(pkg_name)
+    if not pkg_dir.is_dir():
+        return []
+    versions = [d.name for d in pkg_dir.iterdir()
+                if d.is_dir() and is_installed(pkg_name, d.name)]
+    return sorted(versions, key=version_sort_key)
 
 
 # delete_env keeps native libraries orphaned less than this long, so that

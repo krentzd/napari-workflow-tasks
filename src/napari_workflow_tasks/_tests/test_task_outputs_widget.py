@@ -1,6 +1,5 @@
 """After a run, the widget shows the outputs named by the task's arguments."""
 
-import stat
 import sys
 
 import numpy as np
@@ -15,7 +14,8 @@ from napari.layers._source import layer_source  # noqa: E402
 from napari_ome_zarr._reader import napari_get_reader  # noqa: E402
 from ngio import create_ome_zarr_from_array  # noqa: E402
 
-from napari_workflow_tasks import _widget as W  # noqa: E402
+from napari_workflow_tasks import _show, _task_tab  # noqa: E402
+from napari_workflow_tasks._widget import TasksQWidget  # noqa: E402
 
 # Writes "<label_name with {channel_identifier}>" like the Fractal
 # segmentation tasks, unless WRITE is False
@@ -48,8 +48,16 @@ SCHEMA = {
 }
 
 
+def _open(viewer, url):
+    with layer_source(path=url, reader_plugin="napari-ome-zarr"):
+        for data in napari_get_reader(url)(url):
+            viewer._add_layer_from_data(*data)
+
+
 @pytest.fixture
-def setup(qtbot, tmp_path, monkeypatch):
+def setup(qtbot, tmp_path, monkeypatch, fake_package):
+    """``setup(write=True, task=None)``: an image open in the viewer, the
+    widget with the tab of task "SD" (``task``: its script) open."""
     def make(write=True, task=None):
         url = str(tmp_path / "img.zarr")
         container = create_ome_zarr_from_array(
@@ -59,52 +67,41 @@ def setup(qtbot, tmp_path, monkeypatch):
         # left by an earlier run
         container.derive_label("nanog_stardist_segmented").set_array(
             np.zeros((32, 32), "uint32"))
-        (tmp_path / "task.py").write_text(task or f"WRITE = {write}\n" + TASK)
-        pixi = tmp_path / "pixi"
-        pixi.write_text(
-            '#!/bin/sh\nwhile [ "$1" != python ]; do shift; done\nshift\n'
-            f'exec {sys.executable} "$@"\n')
-        pixi.chmod(pixi.stat().st_mode | stat.S_IEXEC)
-        monkeypatch.setattr(W, "find_pixi", lambda: str(pixi))
+        package = fake_package(
+            [{"name": "SD", "executable_parallel": "task.py",
+              "args_schema_parallel": SCHEMA}],
+            {"task.py": task or f"WRITE = {write}\n" + TASK})
         messages = []
-        monkeypatch.setattr(W, "show_info", messages.append)
-        monkeypatch.setattr(W, "show_warning", messages.append)
+        for name in ("show_info", "show_warning", "show_error"):
+            monkeypatch.setattr(_task_tab, name, messages.append)
 
         viewer = ViewerModel()
-        with layer_source(path=url, reader_plugin="napari-ome-zarr"):
-            for data in napari_get_reader(url)(url):
-                viewer._add_layer_from_data(*data)
-        widget = W.TasksQWidget(viewer)
+        _open(viewer, url)
+        widget = TasksQWidget(viewer)
         qtbot.addWidget(widget)
-        widget._image_layers.setCurrentText("DAPI")
-        widget.task_manager.add_task(
-            name="SD", package_name="p", parent_dir=str(tmp_path),
-            executable_parallel="task.py", properties=SCHEMA["properties"],
-            defs=SCHEMA["$defs"], required=SCHEMA["required"],
-            type="object", title="SD",
-        )
-        widget.loaded_packages["p"] = {"pixi_manifest_path": "x"}
-        widget._add_task_tab("SD")
-        return viewer, widget, messages, tmp_path
+        widget.add_package(package, "SD")
+        tab = widget._tabs["SD [p==1.0]"]
+        tab.inputs.combos()[0].choose("DAPI")
+        assert tab.inputs.selected() == [url]
+        return viewer, widget, tab, messages, tmp_path
 
     return make
 
 
-def _run(qtbot, widget):
-    widget._execute_task("SD")
-    qtbot.waitUntil(lambda: not widget._task_workers, timeout=60000)
+def _run(qtbot, tab):
+    tab.run()
+    qtbot.waitUntil(lambda: tab._worker is None, timeout=60000)
 
 
 def test_rerun_shows_label_named_by_arguments(qtbot, setup):
     # Input layer DAPI, but the task segments nanog; its label already exists
-    viewer, widget, messages, _ = setup()
-    form = widget._task_ui["SD"]["form"]
-    form.set_values({
+    viewer, widget, tab, messages, _ = setup()
+    tab.form.set_values({
         "channel": {"identifier": "nanog"},
         "label_name": "{channel_identifier}_stardist_segmented",
     })
     before = viewer.layers["nanog_stardist_segmented"]
-    _run(qtbot, widget)
+    _run(qtbot, tab)
     after = viewer.layers["nanog_stardist_segmented"]
     assert after is not before
     assert np.asarray(after.data[0] if after.multiscale else after.data).max() == 1
@@ -112,9 +109,9 @@ def test_rerun_shows_label_named_by_arguments(qtbot, setup):
 
 
 def test_missing_output_is_reported(qtbot, setup):
-    viewer, widget, messages, _ = setup(write=False)
-    widget._task_ui["SD"]["form"].set_values({"channel": {"identifier": "DAPI"}})
-    _run(qtbot, widget)
+    viewer, widget, tab, messages, _ = setup(write=False)
+    tab.form.set_values({"channel": {"identifier": "DAPI"}})
+    _run(qtbot, tab)
     assert "DAPI_stardist_segmented" not in viewer.layers
     assert len(messages) == 1
     assert "did not write the expected output" in messages[0]
@@ -139,34 +136,31 @@ def _fake_reader(label_names):
 
 @pytest.mark.parametrize("prefix", ["", "labels/labels/"])
 def test_load_labels_any_reader_naming(qtbot, monkeypatch, prefix):
-    monkeypatch.setattr(W, "napari_get_reader", _fake_reader(
+    monkeypatch.setattr(_show, "napari_get_reader", _fake_reader(
         [f"{prefix}nuclei", f"{prefix}DAPI_segmented"]))
     viewer = ViewerModel()
-    widget = W.TasksQWidget(viewer)
-    qtbot.addWidget(widget)
-    added = widget._load_zarr_layers("/d/0", labels={"DAPI_segmented"})
+    added = _show.add_layers(viewer, "/d/0", labels={"DAPI_segmented"},
+                             images=False)
     assert added == ["DAPI_segmented"]
     assert [ly.name for ly in viewer.layers] == ["DAPI_segmented"]
 
 
 def test_reload_replaces_label_opened_with_path_name(qtbot, monkeypatch):
     # opened with napari-ome-zarr 0.10, then re-run
-    monkeypatch.setattr(W, "napari_get_reader",
+    monkeypatch.setattr(_show, "napari_get_reader",
                         _fake_reader(["labels/labels/DAPI_segmented"]))
     viewer = ViewerModel()
     viewer.add_labels(np.zeros((8, 8), "uint32"),
                       name="labels/labels/DAPI_segmented")
-    widget = W.TasksQWidget(viewer)
-    qtbot.addWidget(widget)
-    widget._load_zarr_layers("/d/0", labels={"DAPI_segmented"})
+    _show.add_layers(viewer, "/d/0", labels={"DAPI_segmented"}, images=False)
     assert [ly.name for ly in viewer.layers] == ["DAPI_segmented"]
 
 
 def test_output_on_disk_but_not_loadable_is_reported(qtbot, setup, monkeypatch):
-    viewer, widget, messages, _ = setup()
-    widget._task_ui["SD"]["form"].set_values({"channel": {"identifier": "DAPI"}})
-    monkeypatch.setattr(W, "napari_get_reader", _fake_reader([]))
-    _run(qtbot, widget)
+    viewer, widget, tab, messages, _ = setup()
+    tab.form.set_values({"channel": {"identifier": "DAPI"}})
+    monkeypatch.setattr(_show, "napari_get_reader", _fake_reader([]))
+    _run(qtbot, tab)
     assert len(messages) == 1
     assert "could not load" in messages[0]
     assert "'DAPI_stardist_segmented'" in messages[0]
@@ -192,14 +186,8 @@ def _max(layer):
     return np.asarray(layer.data[0] if layer.multiscale else layer.data).max()
 
 
-def _open(viewer, url):
-    with layer_source(path=url, reader_plugin="napari-ome-zarr"):
-        for data in napari_get_reader(url)(url):
-            viewer._add_layer_from_data(*data)
-
-
 def test_rewritten_input_image_is_reloaded(qtbot, setup):
-    viewer, widget, messages, tmp_path = setup(task=REWRITE_TASK)
+    viewer, widget, tab, messages, tmp_path = setup(task=REWRITE_TASK)
     # A second image with the same channel and label names stays as it is
     other = str(tmp_path / "other.zarr")
     create_ome_zarr_from_array(
@@ -211,9 +199,9 @@ def test_rewritten_input_image_is_reloaded(qtbot, setup):
     other_layers = [ly for ly in viewer.layers
                     if ly.source.path == other]
     old_dapi = viewer.layers["DAPI"]
-    widget._task_ui["SD"]["form"].set_values({"channel": {"identifier": "DAPI"}})
+    tab.form.set_values({"channel": {"identifier": "DAPI"}})
 
-    _run(qtbot, widget)
+    _run(qtbot, tab)
 
     new_dapi = viewer.layers["DAPI"]
     assert new_dapi is not old_dapi
@@ -221,12 +209,12 @@ def test_rewritten_input_image_is_reloaded(qtbot, setup):
     # the input's open label layer is reloaded too, not dropped
     assert "nanog_stardist_segmented" in viewer.layers
     assert all(ly in viewer.layers for ly in other_layers)
-    assert widget._image_layers.currentText() == "DAPI"
+    assert tab.inputs.layers() == ["DAPI"]
     assert messages[0] == "SD: added DAPI, nanog, nanog_stardist_segmented"
 
 
 def test_label_from_other_image_with_same_name_is_kept(qtbot, setup):
-    viewer, widget, messages, tmp_path = setup()
+    viewer, widget, tab, messages, tmp_path = setup()
     other = str(tmp_path / "other.zarr")
     create_ome_zarr_from_array(
         other, np.zeros((2, 32, 32), "uint16"), xy_pixelsize=1.0,
@@ -235,13 +223,13 @@ def test_label_from_other_image_with_same_name_is_kept(qtbot, setup):
         np.zeros((32, 32), "uint32"))
     _open(viewer, other)
     other_label = viewer.layers["DAPI_stardist_segmented"]
-    widget._task_ui["SD"]["form"].set_values({"channel": {"identifier": "DAPI"}})
+    tab.form.set_values({"channel": {"identifier": "DAPI"}})
 
-    _run(qtbot, widget)
+    _run(qtbot, tab)
 
     assert other_label in viewer.layers
     labels = [ly for ly in viewer.layers
-              if W._label_name(ly.name).startswith("DAPI_stardist_segmented")]
+              if _show.label_name(ly.name).startswith("DAPI_stardist_segmented")]
     assert len(labels) == 2
 
 
@@ -251,16 +239,14 @@ def test_reload_keeps_label_renamed_by_napari(qtbot, monkeypatch, tmp_path):
     url = str(tmp_path / "1")
     (tmp_path / "0").mkdir()
     (tmp_path / "1").mkdir()
-    monkeypatch.setattr(W, "napari_get_reader", _fake_reader(["org"]))
+    monkeypatch.setattr(_show, "napari_get_reader", _fake_reader(["org"]))
     viewer = ViewerModel()
     other = viewer.add_labels(np.zeros((8, 8), "uint32"), name="org")
     other.metadata["zarr_url"] = str(tmp_path / "0")
     label = viewer.add_labels(np.zeros((8, 8), "uint32"), name="org")
     label.metadata["zarr_url"] = url
     assert label.name == "org [1]"
-    widget = W.TasksQWidget(viewer)
-    qtbot.addWidget(widget)
-    added = widget._reload_image(url)
+    added = _show.reload_image(viewer, url)
     assert "org" in added or "org [1]" in added
     assert label not in viewer.layers and other in viewer.layers
     assert len([ly for ly in viewer.layers if ly.name.startswith("org")]) == 2

@@ -46,16 +46,19 @@ def test_show_reads_data_a_task_rewrote(env):  # noqa: F811
     import numpy as np
     import zarr
 
-    from napari_workflow_tasks._show import show_outputs
-
-    empty = {"labels": [], "tables": [], "images": []}
-    before = show_outputs([env["url"]], empty, viewer=ViewerModel())
-    assert not np.all(before.layers[0]._data_view == 7)  # sliced: now cached
+    pkg = Package.installed("fake-tasks")
+    seg = pkg.task("Segment")
+    seg.run(env["url"], channels={"identifiers": ["DAPI"]}, log=None)
+    viewer = seg.show(ViewerModel())
+    assert not np.all(viewer.layers["DAPI"]._data_view == 7)  # sliced: cached
 
     group = zarr.open_group(env["url"], mode="r+")
     for path in [ds["path"] for ds in
                  dict(group.attrs)["multiscales"][0]["datasets"]]:
         group[path][:] = 7
-
-    after = show_outputs([env["url"]], empty, viewer=ViewerModel())
-    assert np.all(after.layers[0]._data_view == 7)
+    project = pkg.task("Project")
+    project.run(env["url"], in_place=True, log=None)  # reports the input
+    project.show(viewer)
+    assert np.all(viewer.layers["DAPI"]._data_view == 7)
+    # the label layer that was open is read again too
+    assert "DAPI_segmented" in viewer.layers

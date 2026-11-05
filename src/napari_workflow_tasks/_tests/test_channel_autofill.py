@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("napari")
-from napari_workflow_tasks._schema_form import SchemaForm  # noqa: E402
-from napari_workflow_tasks._widget import (  # noqa: E402
+from napari_workflow_tasks._autofill import (  # noqa: E402
     ChannelAutofill,
-    _input_channel,
+    input_channel,
 )
+from napari_workflow_tasks._schema_form import SchemaForm  # noqa: E402
 
 DATA = Path(__file__).parent / "data"
 
@@ -46,21 +46,21 @@ def _edit(form, value, *path):
 
 
 def test_input_channel_matches_omero_label():
-    assert _input_channel("DAPI", ["DAPI", "nanog"]) == "DAPI"
+    assert input_channel("DAPI", ["DAPI", "nanog"]) == "DAPI"
 
 
 def test_input_channel_strips_output_suffix():
     # layers of task outputs are named "<channel> [<image>]"
-    assert _input_channel("DAPI [0_gaussian_blur]", ["DAPI"]) == "DAPI"
+    assert input_channel("DAPI [0_gaussian_blur]", ["DAPI"]) == "DAPI"
 
 
 def test_input_channel_not_a_channel():
-    assert _input_channel("nuclei", ["DAPI"]) is None
-    assert _input_channel("", ["DAPI"]) is None
+    assert input_channel("nuclei", ["DAPI"]) is None
+    assert input_channel("", ["DAPI"]) is None
 
 
 def test_input_channel_without_channel_metadata_uses_layer_name():
-    assert _input_channel("img", []) == "img"
+    assert input_channel("img", []) == "img"
 
 
 # --------------------------------------------------------------------------
@@ -171,7 +171,7 @@ def test_optional_label_name_without_default_filled(qtbot):
 # --------------------------------------------------------------------------
 
 
-def test_widget_input_layer_drives_task_tab(qtbot, tmp_path):
+def test_input_layer_drives_task_tab(qtbot, tmp_path, fake_package):
     import numpy as np
     from napari.components import ViewerModel
 
@@ -192,29 +192,26 @@ def test_widget_input_layer_drives_task_tab(qtbot, tmp_path):
     for name in ("DAPI", "nanog"):
         viewer.add_image(np.zeros((4, 4)), name=name,
                          metadata={"zarr_url": str(zarr)})
-    widget._image_layers.setCurrentText("DAPI")
-
-    widget.task_manager.add_task(
-        name="SAM", package_name="pkg==1", parent_dir=str(tmp_path),
-        executable_parallel="x.py", properties=schema["properties"],
-        defs=schema["$defs"], required=schema["required"],
-        type="object", title="SAM",
-    )
-    widget._add_task_tab("SAM")
-    form = widget._task_ui["SAM"]["form"]
+    widget.add_package(fake_package([{
+        "name": "SAM", "executable_parallel": "x.py",
+        "args_schema_parallel": schema}]), "SAM")
+    tab = widget._tabs["SAM [p==1.0]"]
+    form = tab.form
+    assert tab.inputs.layers() == ["DAPI"]  # the first image layer
     assert _text(form, "channels", "identifiers") == "DAPI"
     assert _text(form, "label_name") == "DAPI_segmented"
 
-    widget._image_layers.setCurrentText("nanog")
+    tab.inputs.combos()[0].choose("nanog")
     assert _text(form, "channels", "identifiers") == "nanog"
     assert _text(form, "label_name") == "nanog_segmented"
 
-    # closed tab: switching the input must not touch its deleted widgets
+    # closed tab: new layers must not touch its deleted widgets
     from qtpy.QtCore import QCoreApplication, QEvent
 
-    widget._close_tab("SAM")
+    widget.close_task("SAM [p==1.0]")
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-    widget._image_layers.setCurrentText("DAPI")
+    viewer.add_image(np.zeros((4, 4)), name="other",
+                     metadata={"zarr_url": str(zarr)})
 
 
 # --------------------------------------------------------------------------

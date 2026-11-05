@@ -340,6 +340,9 @@ def resolve_install_source(
     pythons = candidate_pythons(requires_python or pv.requires_python)
     if pkg.kind == "pypi":
         return InstallSource([f'version = "=={version}"'], pythons, "PyPI")
+    if pkg.kind == task_packages.LOCAL:  # a source archive on this computer
+        return InstallSource([f"path = {json.dumps(pkg.source)}"], pythons,
+                             os.path.basename(pkg.source))
 
     def _with_wheel(filename, url):
         ok = [py for py in pythons if wheel_is_compatible(filename, py)]

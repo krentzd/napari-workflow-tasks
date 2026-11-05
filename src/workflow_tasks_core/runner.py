@@ -160,7 +160,7 @@ def pixi_run_prefix(pixi: str, entry: dict) -> list[str]:
             entry['pixi_manifest_path'], 'python']
 
 
-def task_command(
+def _task_command(
     run_prefix: list[str], executable: str, args_json, out_json
 ) -> list[str]:
     """Command that runs a task executable with its arguments JSON and
@@ -169,22 +169,9 @@ def task_command(
             "--args-json", str(args_json), "--out-json", str(out_json)]
 
 
-def stream_process(cmd: list[str]) -> Iterator[str]:
-    """Run a command, yielding its output lines; returns the exit code."""
-    env = pixi_env({'PYTHONUNBUFFERED': '1'})
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, env=env,
-    )
-    for line in proc.stdout:
-        yield line.rstrip('\n')
-    return proc.wait()
-
-
 def _stream(cmd: list[str]) -> Iterator[str]:
-    """Like :func:`stream_process`, but raises :class:`TaskFailed` with the
-    last non-empty output line if the command fails, instead of returning
-    the exit code."""
+    """Run a command, yielding its output lines; raises :class:`TaskFailed`
+    with the last non-empty output line if the command fails."""
     env = pixi_env({"PYTHONUNBUFFERED": "1"})
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -211,7 +198,7 @@ def _run_step(
     args_file.write_text(json.dumps(args, indent=1))
     if out_file.exists():
         out_file.unlink()
-    cmd = task_command(job.run_prefix, executable, args_file, out_file)
+    cmd = _task_command(job.run_prefix, executable, args_file, out_file)
     yield f"$ {' '.join(cmd)}"
     yield from _stream(cmd)
     if out_file.exists():

@@ -1,5 +1,8 @@
 """
-Qt panel listing every known Fractal task, with a per-package version picker.
+Qt panel to manage task packages: remove installed ones, install from the
+Fractal catalog (every known Fractal task, with a per-package version
+picker) or from a source archive (.tar.gz) on this computer; shown in its
+own window (``CatalogDialog``).
 
 Packages come from the official Fractal task-list sources; versions are
 listed newest-first and the task list shown is the one of the selected
@@ -9,6 +12,8 @@ version (read from that version's ``__FRACTAL_MANIFEST__.json``).
 from __future__ import annotations
 
 import logging
+import os
+import tarfile
 import time
 
 from napari.qt.threading import create_worker
@@ -18,11 +23,16 @@ from qtpy.QtGui import QBrush, QColor, QFont
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QTreeWidget,
@@ -31,7 +41,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from workflow_tasks_core import install, manifests, snapshot
+from workflow_tasks_core import Catalog, Package, install, manifests, snapshot
 from workflow_tasks_core.manifests import VersionInfo, task_kind
 from workflow_tasks_core.progress import format_elapsed, install_step
 from workflow_tasks_core.runner import RUNNABLE_KINDS
@@ -44,6 +54,20 @@ ROLE = Qt.UserRole
 
 class _LogEmitter(QObject):
     line = Signal(str)
+
+
+def _comma_list(text: str) -> list[str]:
+    """``"a, b,"`` -> ``["a", "b"]``."""
+    return [item.strip() for item in text.split(",") if item.strip()]
+
+
+def _labeled_row(label: str, edit: QLineEdit) -> QWidget:
+    row = QWidget()
+    row.setLayout(QHBoxLayout())
+    row.layout().setContentsMargins(0, 0, 0, 0)
+    row.layout().addWidget(QLabel(label))
+    row.layout().addWidget(edit)
+    return row
 
 
 PINS_TOOLTIP = (
@@ -63,28 +87,65 @@ PINS_LOCK_TOOLTIP = (
 )
 
 
-class CatalogPanel(QGroupBox):
+class CatalogPanel(QWidget):
     """
-    Emits ``installed(pkg, version, info, entry, task_name)`` once a package
-    version has been installed; ``task_name`` is the task the user selected
-    (or "" when a whole package was selected).
+    The installed packages (to remove them), and two ways to install a task
+    package: the Fractal task catalog, and a source archive on this
+    computer ("Install from file"); with the progress below them.
+
+    Emits ``installed(package, task_name)`` once a package version has been
+    installed (``package``: a ``workflow_tasks_core.Package``;
+    ``task_name``: the task the user selected in the catalog, or ""), and
+    ``removed(package)`` once one has been removed.
     """
 
-    installed = Signal(object, str, object, dict, str)
+    installed = Signal(object, str)
+    removed = Signal(object)
 
     COLUMNS = ["Task", "Version", "Type"]
 
     def __init__(self, parent=None):
-        super().__init__("Fractal task catalog", parent)
+        super().__init__(parent)
         self._packages: dict[str, TaskPackage] = {}
         self._infos: dict[tuple[str, str], VersionInfo] = {}
         self._items: dict[str, QTreeWidgetItem] = {}
         self._combos: dict[str, QComboBox] = {}
         self._workers = []  # keep references alive
+        # Loading the catalog
+        self._n_errors = 0
+        self._rate_limit_msg = None
+        self._snapshot_at = None
+        # The selected version: available extras (tooltip)
+        self._extras_tip = ""
+        # "<package>==<version>" being installed
+        self._install_label = ""
+        self._package_job = False  # an install or a removal is running
+        self._removal_allowed = True  # False while a task runs
 
-        layout = QVBoxLayout()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        # Installed packages: remove the ones not needed any more
+        installed_box = QGroupBox("Installed packages")
+        installed_layout = QVBoxLayout(installed_box)
+        installed_layout.setContentsMargins(15, 15, 15, 15)
+        self.installed_list = QListWidget()
+        self.installed_list.setMaximumHeight(140)
+        self.installed_list.itemSelectionChanged.connect(
+            self._update_remove_button)
+        installed_layout.addWidget(self.installed_list)
+        self.remove_btn = QPushButton("Remove package")
+        self.remove_btn.clicked.connect(self._remove_selected)
+        remove_row = QHBoxLayout()
+        remove_row.addStretch(1)
+        remove_row.addWidget(self.remove_btn)
+        installed_layout.addLayout(remove_row)
+        outer.addWidget(installed_box)
+
+        catalog_box = QGroupBox("Fractal task catalog")
+        layout = QVBoxLayout(catalog_box)
         layout.setContentsMargins(15, 15, 15, 15)
-        self.setLayout(layout)
+        outer.addWidget(catalog_box)
 
         # Search + refresh
         top = QWidget()
@@ -95,13 +156,7 @@ class CatalogPanel(QGroupBox):
         self.search.textChanged.connect(self._apply_filter)
         self.refresh_btn = QPushButton("Load catalog")
         self.refresh_btn.clicked.connect(self.refresh)
-        self.live_check = QCheckBox("Live")
-        self.live_check.setToolTip(
-            "Query PyPI/GitHub directly instead of the daily catalog snapshot "
-            "(finds releases from today, but uses GitHub API requests)."
-        )
         top.layout().addWidget(self.search)
-        top.layout().addWidget(self.live_check)
         top.layout().addWidget(self.refresh_btn)
         layout.addWidget(top)
 
@@ -122,36 +177,21 @@ class CatalogPanel(QGroupBox):
         layout.addWidget(self.tree)
 
         # Extras
-        extras_row = QWidget()
-        extras_row.setLayout(QHBoxLayout())
-        extras_row.layout().setContentsMargins(0, 0, 0, 0)
-        extras_row.layout().addWidget(QLabel("pip extras:"))
         self.extras_edit = QLineEdit()
         self.extras_edit.setPlaceholderText("e.g. fractal-tasks (comma separated)")
-        extras_row.layout().addWidget(self.extras_edit)
-        layout.addWidget(extras_row)
+        layout.addWidget(_labeled_row("pip extras:", self.extras_edit))
 
         # Pinned dependencies (like fractal-server's pinned_package_versions)
-        pins_row = QWidget()
-        pins_row.setLayout(QHBoxLayout())
-        pins_row.layout().setContentsMargins(0, 0, 0, 0)
-        pins_row.layout().addWidget(QLabel("Pinned packages:"))
         self.pins_edit = QLineEdit()
         self.pins_edit.setPlaceholderText("e.g. cellpose<4.2, numpy==1.26.4")
         self.pins_edit.setToolTip(PINS_TOOLTIP)
-        pins_row.layout().addWidget(self.pins_edit)
-        layout.addWidget(pins_row)
+        layout.addWidget(_labeled_row("Pinned packages:", self.pins_edit))
 
         # Dependencies to leave out (e.g. CUDA-only packages on macOS)
-        skip_row = QWidget()
-        skip_row.setLayout(QHBoxLayout())
-        skip_row.layout().setContentsMargins(0, 0, 0, 0)
-        skip_row.layout().addWidget(QLabel("Skip packages:"))
         self.skip_edit = QLineEdit()
         self.skip_edit.setPlaceholderText("e.g. cupy-cuda12x")
         self.skip_edit.setToolTip(SKIP_TOOLTIP)
-        skip_row.layout().addWidget(self.skip_edit)
-        layout.addWidget(skip_row)
+        layout.addWidget(_labeled_row("Skip packages:", self.skip_edit))
 
         self.lock_check = QCheckBox("Use the package's pixi.lock when available")
         self.lock_check.setChecked(True)
@@ -175,24 +215,50 @@ class CatalogPanel(QGroupBox):
         self.install_btn.clicked.connect(self._install_selected)
         layout.addWidget(self.install_btn)
 
+        # Install from a source archive on this computer
+        file_box = QGroupBox("Install from file")
+        file_layout = QVBoxLayout(file_box)
+        file_layout.setContentsMargins(15, 15, 15, 15)
+        self.file_path = QLineEdit()
+        self.file_path.setPlaceholderText(
+            "Source archive (.tar.gz) of a task package")
+        self.file_path.textChanged.connect(self._update_file_button)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse_file)
+        path_row = QHBoxLayout()
+        path_row.addWidget(QLabel("Path:"))
+        path_row.addWidget(self.file_path, 1)
+        path_row.addWidget(browse_btn)
+        file_layout.addLayout(path_row)
+        self.file_btn = QPushButton("Install from file")
+        self.file_btn.setToolTip(
+            "Install the task package in this source archive (e.g. made "
+            "with `python -m build --sdist`), with the pip extras, pinned "
+            "and skipped packages and pixi.lock choice of the catalog above")
+        self.file_btn.clicked.connect(self._install_from_file)
+        file_layout.addWidget(self.file_btn)
+        outer.addWidget(file_box)
+
         # Busy indicator for slow steps (loading, installing, caching)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setTextVisible(False)
         self.progress.setMaximumHeight(8)
         self.progress.setVisible(False)
-        layout.addWidget(self.progress)
+        outer.addWidget(self.progress)
 
-        self.status = QLabel("Click “Load catalog” to list all Fractal tasks.")
+        self.status = QLabel("")
         self.status.setWordWrap(True)
-        layout.addWidget(self.status)
+        outer.addWidget(self.status)
 
         # Latest install output line, under the step
         self.detail = QLabel("")
         self.detail.setStyleSheet("color: gray;")
         self.detail.setWordWrap(True)
         self.detail.setVisible(False)
-        layout.addWidget(self.detail)
+        outer.addWidget(self.detail)
+        self._update_file_button()
+        self.refresh_installed()
 
         self._step = ""
         self._busy_since = None
@@ -243,8 +309,9 @@ class CatalogPanel(QGroupBox):
         self._rate_limit_msg = None
         self._snapshot_at = None
 
+        # The daily catalog snapshot (if it can't be read: PyPI/GitHub live)
         worker = create_worker(
-            snapshot.iter_catalog, live=self.live_check.isChecked(),
+            snapshot.iter_catalog,
             _ignore_errors=True,  # handled by _on_worker_error
         )
         worker.yielded.connect(self._on_catalog_item)
@@ -494,7 +561,7 @@ class CatalogPanel(QGroupBox):
             "used only if that falls back to resolving dependencies"
             if use else ""
         )
-        tip = getattr(self, "_extras_tip", "")
+        tip = self._extras_tip
         self.extras_edit.setToolTip("\n".join(t for t in (note, tip) if t))
         self.pins_edit.setEnabled(True)
         self.pins_edit.setToolTip(
@@ -510,65 +577,86 @@ class CatalogPanel(QGroupBox):
         if sel is None or not self.install_btn.isEnabled():
             return
         kind, pkg_name, task_name, _item = sel
-        pkg = self._packages[pkg_name]
         version = self.selected_version(pkg_name)
-        extras = [
-            e.strip() for e in self.extras_edit.text().split(",") if e.strip()
-        ]
-        pins = [
-            p.strip() for p in self.pins_edit.text().split(",") if p.strip()
-        ]
-        skip = [
-            s.strip() for s in self.skip_edit.text().split(",") if s.strip()
-        ]
+        self._install(Package(self._packages[pkg_name], version),
+                      task_name or "")
+
+    def _browse_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Source archive of a task package", "",
+            "Source archives (*.tar.gz)")
+        if path:  # not cancelled
+            self.file_path.setText(path)
+
+    def _update_file_button(self, *_):
+        has_path = bool(self.file_path.text().strip())
+        self.file_btn.setEnabled(has_path and not self._package_job)
+
+    def _install_from_file(self):
+        path = self.file_path.text().strip()
+        if not path:
+            return
+        try:
+            package = Package.from_file(path)
+        except (OSError, ValueError, tarfile.TarError) as e:
+            show_error(f"Cannot install {os.path.basename(path)}: {e}")
+            return
+        self._install(package, "")
+
+    def _install(self, package: Package, task_name: str):
+        """Install ``package`` in the background with the options of the
+        panel; ``task_name``: the task to open afterwards ("" for none)."""
+        extras = _comma_list(self.extras_edit.text())
+        pins = _comma_list(self.pins_edit.text())
+        skip = _comma_list(self.skip_edit.text())
         use_lock = self.lock_check.isChecked()
 
+        self._package_job = True
         self.install_btn.setEnabled(False)
+        self._update_remove_button()
+        self._update_file_button()
         self.refresh_btn.setEnabled(False)
-        self._install_label = f"{pkg_name}=={version}"
+        self._install_label = package.key
         self._start_busy(f"Preparing {self._install_label}")
         self.detail.setVisible(True)
 
         emitter = _LogEmitter()
         emitter.line.connect(self._on_install_log)
 
-        def _install():
-            entry = install.install_version(
-                pkg, version, extras=extras, log=emitter.line.emit, pins=pins,
-                use_lock=use_lock, skip=skip,
-            )
-            emitter.line.emit("Reading the task list")
-            return manifests.get_version_info(pkg, version), entry
-
-        worker = create_worker(_install, _ignore_errors=True)
-        worker.returned.connect(
-            lambda res: self._on_installed(
-                pkg, version, res[0], res[1], task_name or ""
-            )
+        worker = create_worker(
+            package.install, log=emitter.line.emit, extras=extras, pins=pins,
+            use_lock=use_lock, skip=skip, _ignore_errors=True,
         )
+        worker.returned.connect(
+            lambda package: self._on_installed(package, task_name))
         worker.errored.connect(self._on_worker_error)
         worker.finished.connect(self._stop_busy)
         worker.finished.connect(lambda: self.refresh_btn.setEnabled(True))
+        worker.finished.connect(self._on_package_job_finished)
         worker.finished.connect(self._on_selection_changed)
         worker._emitter = emitter  # keep alive
         self._start(worker)
+
+    def _on_package_job_finished(self):
+        self._package_job = False
+        self._update_file_button()
+        self._update_remove_button()
 
     def _on_install_log(self, line: str):
         logger.info(line)
         if not line.strip():
             return
         step = install_step(line)
-        if line.startswith("Reading the task list"):
-            step = "Reading the task list"
         if step:
             self._set_step(f"{step}: {self._install_label}")
         self.detail.setText(line.strip()[:200])
 
-    def _on_installed(self, pkg, version, info, entry, task_name):
+    def _on_installed(self, package, task_name):
         self._stop_busy()
-        combo = self._combos.get(pkg.pkg_name)
+        entry = package.entry
+        combo = self._combos.get(package.name)
         if combo is not None:
-            idx = combo.findData(version)
+            idx = combo.findData(package.version)
             if idx >= 0 and "✓" not in combo.itemText(idx):
                 combo.setItemText(idx, combo.itemText(idx) + "  ✓")
         how = " from its pixi.lock" if entry.get("pixi_frozen") else ""
@@ -580,9 +668,81 @@ class CatalogPanel(QGroupBox):
             how += f" (skipped: {', '.join(skipped)})"
         if not entry.get("pixi_frozen") and entry.get("lock_note"):
             how += f" (not from its pixi.lock: {entry['lock_note']})"
-        self.status.setText(f"Installed {pkg.pkg_name}=={version}{how}.")
-        show_info(f"Installed {pkg.pkg_name}=={version}{how}")
-        self.installed.emit(pkg, version, info, entry, task_name)
+        self.status.setText(f"Installed {package.key}{how}.")
+        show_info(f"Installed {package.key}{how}")
+        self.refresh_installed()
+        self.installed.emit(package, task_name)
+
+    # ------------------------------------------------------------------
+    # Installed packages
+    # ------------------------------------------------------------------
+
+    def refresh_installed(self):
+        """List the package versions installed on this computer."""
+        self.installed_list.clear()
+        for package in Catalog.installed():
+            item = QListWidgetItem(str(package))
+            item.setData(ROLE, package)
+            self.installed_list.addItem(item)
+        if not self.installed_list.count():
+            item = QListWidgetItem("(no packages installed yet)")
+            item.setFlags(Qt.NoItemFlags)
+            self.installed_list.addItem(item)
+        self._update_remove_button()
+
+    def set_removal_allowed(self, allowed: bool):
+        """Packages can't be removed while a task runs (it may use one)."""
+        self._removal_allowed = allowed
+        self._update_remove_button()
+
+    def _selected_installed(self):
+        item = self.installed_list.currentItem()
+        if item is None or not item.isSelected():
+            return None
+        return item.data(ROLE)
+
+    def _update_remove_button(self):
+        self.remove_btn.setEnabled(
+            self._selected_installed() is not None
+            and self._removal_allowed and not self._package_job)
+        self.remove_btn.setToolTip(
+            "Delete the environment of the selected package version"
+            if self._removal_allowed else
+            "Packages can't be removed while a task runs")
+
+    def _remove_selected(self):
+        package = self._selected_installed()
+        if package is None or not self.remove_btn.isEnabled():
+            return
+        answer = QMessageBox.question(
+            self, "Remove package",
+            f"Remove {package}? Its environment is deleted; open tabs of "
+            "its tasks are closed.")
+        if answer != QMessageBox.Yes:
+            return
+        self._package_job = True
+        self._update_remove_button()
+        self.install_btn.setEnabled(False)
+        self._update_file_button()
+        self._start_busy(f"Removing {package}")
+        worker = create_worker(package.remove, _ignore_errors=True)
+        worker.returned.connect(lambda _: self._on_removed(package))
+        worker.errored.connect(self._on_worker_error)
+        worker.finished.connect(self._stop_busy)
+        worker.finished.connect(self._on_package_job_finished)
+        worker.finished.connect(self._on_selection_changed)
+        self._start(worker)
+
+    def _on_removed(self, package):
+        combo = self._combos.get(package.name)
+        if combo is not None:
+            idx = combo.findData(package.version)
+            if idx >= 0:
+                combo.setItemText(idx, combo.itemText(idx).replace("  ✓", ""))
+        self.status.setText(f"Removed {package}.")
+        show_info(f"Removed {package}")
+        self.refresh_installed()
+        self.removed.emit(package)
 
     # ------------------------------------------------------------------
 
@@ -600,3 +760,17 @@ class CatalogPanel(QGroupBox):
             else None
         )
         worker.start()
+
+
+class CatalogDialog(QDialog):
+    """Window to manage task packages: remove installed ones, install new
+    ones from the Fractal catalog or from a source archive (see
+    ``panel.installed`` and ``panel.removed``)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manage packages")
+        self.resize(640, 900)
+        self.panel = CatalogPanel(self)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.panel)

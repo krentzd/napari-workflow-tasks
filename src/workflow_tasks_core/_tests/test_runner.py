@@ -14,7 +14,6 @@ from workflow_tasks_core.runner import (
     pixi_run_prefix,
     run_task_job,
     short_name,
-    stream_process,
 )
 
 SCRIPT = r"""
@@ -151,20 +150,6 @@ def test_pixi_run_prefix():
     assert pixi_run_prefix("pixi", entry) == [
         "pixi", "run", "--frozen", "--manifest-path", "/env/pixi.toml",
         "python"]
-
-
-def test_stream_process_returns_exit_code():
-    gen = stream_process([sys.executable, "-c",
-                          "print('a'); print('b'); raise SystemExit(3)"])
-    lines = []
-    while True:
-        try:
-            lines.append(next(gen))
-        except StopIteration as stop:
-            returncode = stop.value
-            break
-    assert lines == ["a", "b"]
-    assert returncode == 3
 
 
 def test_failure_carries_partial_result(scripts):

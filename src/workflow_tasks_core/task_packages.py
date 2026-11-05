@@ -24,9 +24,13 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
+import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from email.parser import Parser
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -104,10 +108,14 @@ class PackageVersion:
             return False
 
 
+# Kind of a package from a source archive on this computer
+LOCAL = "local"
+
+
 @dataclass
 class TaskPackage:
-    source: str
-    kind: str  # "pypi" | "github"
+    source: str  # its catalog source; for LOCAL: the archive's path
+    kind: str  # "pypi" | "github" | LOCAL
     pkg_name: str  # normalized distribution name
     versions: list[PackageVersion] = field(default_factory=list)
     # From the snapshot: {version: summary dict} and where full manifests live
@@ -551,3 +559,64 @@ def release_sdist_guess(pv: PackageVersion) -> Optional[tuple[str, Optional[int]
             return url, int(size) if size and size.isdigit() else None
     except Exception:  # noqa: BLE001
         return None
+
+
+# --------------------------------------------------------------------------
+# Source archives on this computer
+# --------------------------------------------------------------------------
+
+
+def sdist_metadata(path) -> dict:
+    """Name, version, Requires-Python and extras of a source archive
+    (``.tar.gz``): from its PKG-INFO (an sdist, e.g. made with
+    ``python -m build --sdist``), else from the ``[project]`` table of its
+    pyproject.toml. ``has_pixi_lock``: it ships a pixi.lock."""
+    path = Path(path)
+    with tarfile.open(path, "r:gz") as tar:
+        names = tar.getnames()
+        if not names:
+            raise ValueError(f"{path.name} is empty")
+        top = names[0].split("/")[0]
+
+        def read(name):
+            if f"{top}/{name}" not in names:
+                return None
+            return tar.extractfile(f"{top}/{name}").read().decode()
+
+        pkg_info, pyproject = read("PKG-INFO"), read("pyproject.toml")
+    if pkg_info:
+        meta = Parser().parsestr(pkg_info)
+        name, version = meta.get("Name"), meta.get("Version")
+        requires_python = meta.get("Requires-Python")
+        extras = meta.get_all("Provides-Extra") or []
+    elif pyproject:
+        project = tomllib.loads(pyproject).get("project", {})
+        name, version = project.get("name"), project.get("version")
+        requires_python = project.get("requires-python")
+        extras = list(project.get("optional-dependencies") or {})
+    else:
+        name = version = None
+    if not name or not version:
+        raise ValueError(
+            f"{path.name}: cannot tell the package's name and version (no "
+            "PKG-INFO, and pyproject.toml does not set them); build the "
+            "archive with `python -m build --sdist`")
+    return {"name": name, "version": version,
+            "requires_python": requires_python, "extras": extras,
+            "has_pixi_lock": f"{top}/pixi.lock" in names}
+
+
+def local_package(path) -> TaskPackage:
+    """A task package from a source archive (``.tar.gz``) on this computer,
+    with its one version."""
+    path = Path(path).expanduser().resolve()
+    meta = sdist_metadata(path)
+    url = path.as_uri()
+    version = PackageVersion(
+        version=meta["version"], wheel_url=url, wheel_filename=path.name,
+        requires_python=meta["requires_python"], source_url=url,
+        source_size=path.stat().st_size, pixi_lock=meta["has_pixi_lock"],
+    )
+    return TaskPackage(source=str(path), kind=LOCAL,
+                       pkg_name=normalize_package_name(meta["name"]),
+                       versions=[version])

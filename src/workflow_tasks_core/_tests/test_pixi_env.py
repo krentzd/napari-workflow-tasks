@@ -28,7 +28,7 @@ def test_install_commands_do_not_inherit_it(monkeypatch):
 
 def test_task_runs_do_not_inherit_it(monkeypatch):
     monkeypatch.setenv("PYTHONEXECUTABLE", "/plugin/python")
-    lines = list(runner.stream_process([sys.executable, "-c", PRINT_IT]))
+    lines = list(runner._stream([sys.executable, "-c", PRINT_IT]))
     assert lines == ["None"]
 
 

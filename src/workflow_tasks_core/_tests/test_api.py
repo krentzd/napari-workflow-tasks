@@ -63,6 +63,9 @@ a = p.parse_args(); args = json.load(open(a.args_json))
 print("ARGS", json.dumps(args, sort_keys=True))
 updates = []
 for url in args["zarr_urls"]:
+    if args.get("in_place"):
+        updates.append({"zarr_url": url})
+        continue
     new = url + "_" + args.get("suffix", "mip")
     shutil.copytree(url, new, dirs_exist_ok=True)
     updates.append({"zarr_url": new, "origin": url})
@@ -125,6 +128,7 @@ MANIFEST = {
                     "zarr_urls": {"type": "array", "items": {"type": "string"}},
                     "zarr_dir": {"type": "string"},
                     "suffix": {"type": "string", "default": "mip"},
+                    "in_place": {"type": "boolean", "default": False},
                 },
                 "required": ["zarr_urls", "zarr_dir"],
             },
@@ -203,10 +207,21 @@ def test_installed_package_picks_newest(env):
         (d / ".pixi" / "envs").mkdir(parents=True)
         (d / "pixi.toml").write_text("")
         (d / install.ENTRY_FILE).write_text(json.dumps({**entry, "version": version}))
+    assert install.installed_versions("fake-tasks") == ["0.9", "1.0", "1.10"]
     assert Package.installed("fake-tasks").version == "1.10"
     assert Package.installed("fake-tasks", "0.9").version == "0.9"
     assert [str(p) for p in Catalog.installed()] == [
         "fake-tasks 0.9", "fake-tasks 1.0", "fake-tasks 1.10"]
+
+
+def test_remove_package(env):
+    pkg = Package.installed("fake-tasks")
+    pkg.remove()
+    assert not pkg.is_installed
+    assert pkg.entry is None
+    assert Catalog.installed() == []
+    with pytest.raises(FileNotFoundError, match="not installed"):
+        Package.installed("fake-tasks")
 
 
 def test_installed_package_missing(env):
@@ -253,16 +268,17 @@ def test_install_returns_the_package(env, monkeypatch):
     monkeypatch.setattr(api.manifests, "get_version_info", lambda p, v: _info())
     calls = []
 
-    def fake_install(pkg, version, extras=None, log=print, pins=None, use_lock=True):
-        calls.append((pkg.pkg_name, version, extras, pins, use_lock))
+    def fake_install(pkg, version, extras=None, log=print, pins=None, use_lock=True,
+                     skip=None):
+        calls.append((pkg.pkg_name, version, extras, pins, use_lock, skip))
         log("installing")
         return install.installed_entry("fake-tasks", "1.0")
 
     monkeypatch.setattr(api.install, "install_version", fake_install)
     pkg = Package(_catalog_package())
     lines = []
-    assert pkg.install(log=lines.append, pins=["numpy<2"]) is pkg
-    assert calls == [("fake-tasks", "1.0", None, ["numpy<2"], True)]
+    assert pkg.install(log=lines.append, pins=["numpy<2"], skip=["cupy"]) is pkg
+    assert calls == [("fake-tasks", "1.0", None, ["numpy<2"], True, ["cupy"])]
     assert lines == ["installing"]
     assert pkg.task("Segment").run(env["url"], channels={"identifiers": ["DAPI"]},
                                    log=None).outputs("labels")
@@ -347,6 +363,18 @@ def test_help(segment, capsys):
     assert "label_name                   str = '…'" in capsys.readouterr().out
 
 
+def test_args_schema(segment, env):
+    schema = segment.args_schema("parallel")
+    assert "channels" in schema["properties"]
+    assert "Channels" in schema["$defs"]
+    assert segment.args_schema("non_parallel") is None
+    project = Package.installed("fake-tasks").task("Project")
+    assert project.args_schema("parallel") is None
+    assert "suffix" in project.args_schema("non_parallel")["properties"]
+    with pytest.raises(ValueError, match="step must be"):
+        segment.args_schema("compute")
+
+
 def test_validate(segment):
     segment.validate({"channels": {"identifiers": ["DAPI"]}})
     with pytest.raises(SchemaError) as info:
@@ -385,6 +413,31 @@ def test_run_parallel(env, segment):
     args = json.loads((run_dir / "image_1.args.json").read_text())
     assert args == {"zarr_url": env["url"], "channels": {"identifiers": ["DAPI"]},
                     "create_masking_roi_table": {"mode": "Create"}}
+
+
+def test_run_lines(env, segment):
+    lines = segment.run_lines(env["url"], channels={"identifiers": ["DAPI"]})
+    assert segment.log == []  # nothing runs before iterating
+    received = list(lines)
+    assert "segmenting DAPI" in received
+    assert segment.log == received
+    assert segment.outputs("labels") == [f"{env['url']}/labels/DAPI_segmented"]
+
+
+def test_run_lines_checks_right_away(env, segment):
+    with pytest.raises(SchemaError, match="channels: required"):
+        segment.run_lines(env["url"])
+    with pytest.raises(FileNotFoundError, match="no OME-Zarr image"):
+        segment.run_lines(str(env["tmp"] / "nope.zarr"),
+                          channels={"identifiers": ["a"]})
+
+
+def test_run_lines_failure(env, segment):
+    lines = segment.run_lines(env["url"], channels={"identifiers": ["FAIL"]})
+    with pytest.raises(TaskFailed, match="no such channel"):
+        list(lines)
+    assert segment.failed == [env["url"]]
+    assert not segment._lock.locked()
 
 
 def test_run_args_dict_and_kwargs(env, segment):
@@ -472,6 +525,15 @@ def test_run_non_parallel_and_chain(env):
     segment.run(project.outputs("images"), channels={"identifiers": ["DAPI"]},
                 log=None)
     assert segment.outputs("labels") == [f"{u}/labels/DAPI_segmented" for u in new]
+
+
+def test_rewritten_inputs(env):
+    project = Package.installed("fake-tasks").task("Project")
+    project.run(env["url"], in_place=True, log=None)
+    assert project.rewritten == [env["url"]]
+    assert project.outputs("images") == []
+    project.run(env["url"], log=None)
+    assert project.rewritten == []
 
 
 def test_run_zarr_dir(env):

@@ -28,16 +28,17 @@ import difflib
 import json
 import os
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Optional, Union
 
 from . import install, manifests, paths, snapshot, task_packages
-from .manifests import VersionInfo, task_kind
+from .manifests import VersionInfo, docs_summary, task_kind
 from .outputs import (
     expected_image_urls,
     expected_label_names,
     expected_table_names,
+    rewritten_inputs,
 )
 from .args_io import ImportedArgs, export_args, export_workflow, read_args, write_json
 from .pixi_config import find_pixi
@@ -59,12 +60,7 @@ from .schema import (
     validate,
     with_defs,
 )
-from .task_packages import (
-    TaskPackage,
-    normalize_package_name,
-    version_sort_key,
-)
-from .tasks import docs_summary
+from .task_packages import TaskPackage, normalize_package_name
 from .zarr_meta import list_labels, list_tables
 
 __all__ = ["Catalog", "Package", "Task"]
@@ -174,11 +170,7 @@ class Catalog:
         if not root.is_dir():
             return found
         for pkg_dir in sorted(root.iterdir()):
-            if not pkg_dir.is_dir():
-                continue
-            versions = [v.name for v in pkg_dir.iterdir()
-                        if install.is_installed(pkg_dir.name, v.name)]
-            for version in sorted(versions, key=version_sort_key):
+            for version in install.installed_versions(pkg_dir.name):
                 try:
                     found.append(Package.installed(pkg_dir.name, version))
                 except FileNotFoundError:
@@ -218,13 +210,7 @@ class Package:
         """An installed package (newest installed version by default),
         read from ``~/.napari_workflow_tasks/envs`` without the catalog."""
         pkg_name = normalize_package_name(name)
-        pkg_dir = Path(paths.ENVS_DIR) / pkg_name
-        versions = sorted(
-            (v.name for v in pkg_dir.iterdir()
-             if install.is_installed(pkg_name, v.name))
-            if pkg_dir.is_dir() else [],
-            key=version_sort_key,
-        )
+        versions = install.installed_versions(pkg_name)
         if not versions or (version is not None and version not in versions):
             what = pkg_name if version is None else f"{pkg_name} {version}"
             have = f" (installed: {', '.join(versions)})" if versions else ""
@@ -233,6 +219,13 @@ class Package:
         entry = install.installed_entry(pkg_name, version)
         package = TaskPackage(source="", kind="installed", pkg_name=pkg_name)
         return cls(package, version, entry=entry)
+
+    @classmethod
+    def from_file(cls, path) -> "Package":
+        """A task package from a source archive (``.tar.gz``, e.g. made with
+        ``python -m build --sdist``) on this computer; ``install()`` it like
+        a package from the catalog."""
+        return cls(task_packages.local_package(path))
 
     # -- what it is --------------------------------------------------------
 
@@ -307,10 +300,13 @@ class Package:
 
     def install(self, log: LogFn = print, extras: Optional[list[str]] = None,
                 pins: Optional[list[str]] = None,
-                use_lock: bool = True) -> "Package":
+                use_lock: bool = True,
+                skip: Optional[list[str]] = None) -> "Package":
         """Install this version into its own pixi environment (quick when
         already installed). ``log`` gets each line of the install log
-        (None: silent); ``pins``: e.g. ``["numpy<2"]``. Returns the package."""
+        (None: silent); ``pins``: e.g. ``["numpy<2"]``; ``skip``:
+        dependencies to leave out, e.g. ``["cupy-cuda12x"]``. Returns the
+        package."""
         if not self._pkg.versions:  # from Package.installed: nothing to fetch
             if self.entry is None:
                 raise RuntimeError(f"{self}: get it from Catalog().package() "
@@ -318,10 +314,17 @@ class Package:
             return self
         self._entry = install.install_version(
             self._pkg, self.version, extras=extras, log=log or (lambda _: None),
-            pins=pins, use_lock=use_lock,
+            pins=pins, use_lock=use_lock, skip=skip,
         )
         self._manifest = None  # read the installed manifest from now on
         return self
+
+    def remove(self) -> None:
+        """Delete this version's environment. Its install recipe is kept,
+        so installing it again is quicker."""
+        install.delete_env(self.name, self.version)
+        self._entry = None
+        self._manifest = None
 
     def task(self, name: str) -> "Task":
         """One of the package's tasks, by name (see ``tasks``)."""
@@ -355,7 +358,7 @@ class Task:
     ``run(images, **args)`` runs it (in the package's pixi environment) and
     returns the task. After a run: ``outputs()`` (paths of the labels,
     tables and images it wrote), ``zarr_urls`` (the image list for the next
-    task), ``missing``, ``failed``, ``log`` and ``show()``.
+    task), ``missing``, ``failed``, ``rewritten``, ``log`` and ``show()``.
     """
 
     def __init__(self, package: Package, manifest_task: dict):
@@ -371,6 +374,9 @@ class Task:
         self.zarr_urls: list[str] = []
         self.missing: list[str] = []
         self.failed: list[str] = []
+        # Inputs the task rewrote in place (e.g. Apply Registration to
+        # Image with overwrite_input): data read before the run is stale
+        self.rewritten: list[str] = []
         self.inputs: list[str] = []
         self._outputs: Optional[dict] = None
 
@@ -390,14 +396,23 @@ class Task:
 
     # -- arguments -----------------------------------------------------------
 
+    def args_schema(self, step: str) -> Optional[dict]:
+        """The JSON Schema of the arguments of one step, ``"parallel"`` or
+        ``"non_parallel"`` (the setup step of a compound task), with its
+        ``$defs``; None if the task has no such step."""
+        if step not in ("parallel", "non_parallel"):
+            raise ValueError('step must be "parallel" or "non_parallel"')
+        schema = self._task.get(f"args_schema_{step}")
+        return with_defs(schema) if schema else None
+
     def _schemas(self) -> list[tuple[str, dict]]:
         """(step, schema) per step with arguments: "non_parallel" (the setup
         step of a compound task) first, then "parallel"."""
         steps = []
         for step in ("non_parallel", "parallel"):
-            schema = self._task.get(f"args_schema_{step}")
+            schema = self.args_schema(step)
             if schema:
-                steps.append((step, with_defs(schema)))
+                steps.append((step, schema))
         return steps
 
     def _merged_schema(self) -> dict:
@@ -583,6 +598,24 @@ class Task:
         and :class:`TaskFailed` if the task fails (``log`` and ``failed``
         are kept). Returns the task: see ``outputs()``.
         """
+        lines = self.run_lines(images, args, zarr_dir=zarr_dir,
+                               stop_on_error=stop_on_error,
+                               non_parallel_args=non_parallel_args, **kwargs)
+        for line in lines:
+            if log is not None:
+                log(line)
+        return self
+
+    def run_lines(self, images: Images, args: Optional[dict] = None, *,
+                  zarr_dir: Optional[str] = None, stop_on_error: bool = True,
+                  non_parallel_args: Optional[dict] = None,
+                  **kwargs) -> Iterator[str]:
+        """Like :meth:`run`, but returns the log lines one by one: the task
+        runs while you iterate over them (e.g. in a GUI's worker thread).
+
+        The task, its arguments and the images are checked right away, so
+        those errors are raised by this call; :class:`TaskFailed` is
+        raised while iterating."""
         if self.kind not in RUNNABLE_KINDS:
             raise ValueError(
                 f"{self.name} is a {self.kind} task: it creates new OME-Zarrs "
@@ -597,43 +630,51 @@ class Task:
         if errors:
             raise _combined(errors)
         urls = self._image_urls(images)
+        if self._lock.locked():
+            raise RuntimeError(f"{self.name} is already running")
+        job = TaskJob(
+            kind=self.kind,
+            run_prefix=pixi_run_prefix(find_pixi(), entry),
+            executable_parallel=self._executable(entry, "parallel"),
+            executable_non_parallel=self._executable(entry, "non_parallel"),
+            zarr_urls=urls,
+            zarr_dir=zarr_dir or default_zarr_dir(urls),
+            args_parallel=args_p,
+            args_non_parallel=args_np,
+            workdir=self.run_dir,
+            stop_on_error=stop_on_error,
+        )
+        return self._run_job(job, {**args_np, **args_p})
 
+    def _run_job(self, job: TaskJob, args: dict) -> Iterator[str]:
+        """Run ``job``, yielding its log lines, then find what it wrote."""
         if not self._lock.acquire(blocking=False):
             raise RuntimeError(f"{self.name} is already running")
         try:
-            self.log, self.failed, self.missing = [], [], []
+            urls = job.zarr_urls
+            self.log, self.failed, self.missing, self.rewritten = [], [], [], []
             self.zarr_urls, self.inputs, self._outputs = [], urls, None
             before = {u: (set(list_labels(u)), set(list_tables(u))) for u in urls}
-            job = TaskJob(
-                kind=self.kind,
-                run_prefix=pixi_run_prefix(find_pixi(), entry),
-                executable_parallel=self._executable(entry, "parallel"),
-                executable_non_parallel=self._executable(entry, "non_parallel"),
-                zarr_urls=urls,
-                zarr_dir=zarr_dir or default_zarr_dir(urls),
-                args_parallel=args_p,
-                args_non_parallel=args_np,
-                workdir=self.run_dir,
-                stop_on_error=stop_on_error,
-            )
-            lines = run_task_job(job)
-            while True:
-                try:
-                    line = next(lines)
-                except StopIteration as stop:
-                    result = stop.value
-                    break
-                except TaskFailed as e:
-                    result = e.result or TaskResult(failed=list(urls))
-                    self._collect(result, urls, before, {**args_np, **args_p})
-                    raise
-                self.log.append(line)
-                if log is not None:
-                    log(line)
-            self._collect(result, urls, before, {**args_np, **args_p})
+            try:
+                result = yield from self._keep_log(run_task_job(job))
+            except TaskFailed as e:
+                result = e.result or TaskResult(failed=list(urls))
+                self._collect(result, urls, before, args)
+                raise
+            self._collect(result, urls, before, args)
         finally:
             self._lock.release()
-        return self
+
+    def _keep_log(self, lines: Iterator[str]):
+        """Pass the lines of a run on, keeping them in ``self.log``;
+        returns what the run returns (its :class:`TaskResult`)."""
+        while True:
+            try:
+                line = next(lines)
+            except StopIteration as done:
+                return done.value
+            self.log.append(line)
+            yield line
 
     def _collect(self, result: TaskResult, urls: list[str], before: dict,
                  args: dict) -> None:
@@ -672,6 +713,7 @@ class Task:
                           if u not in removed]
         self.missing = missing
         self.failed = list(result.failed)
+        self.rewritten = rewritten_inputs(result.image_list_updates, urls)
         self._outputs = {"labels": labels, "tables": tables, "images": images}
 
     # -- after a run -----------------------------------------------------------
@@ -695,11 +737,11 @@ class Task:
         images, in napari: in ``viewer`` if given, else in the current
         viewer, else in a new one. Returns the viewer. Needs
         the napari plugin (napari-workflow-tasks) and napari installed."""
-        outputs = self.outputs()
+        self.outputs()  # raises if the task has not run yet
         try:
-            from napari_workflow_tasks._show import show_outputs
+            from napari_workflow_tasks._show import show_task
         except ImportError as e:
             raise RuntimeError(
                 "Task.show() needs napari and the napari-workflow-tasks "
                 f"plugin ({e})") from e
-        return show_outputs(self.inputs, outputs, viewer=viewer)
+        return show_task(self, viewer)

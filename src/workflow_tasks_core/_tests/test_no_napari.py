@@ -53,4 +53,3 @@ def test_core_imports_without_napari():
     assert "workflow_tasks_core.install" in imported
     assert "workflow_tasks_core.runner" in imported
     assert "workflow_tasks_core.schema" in imported
-    assert "workflow_tasks_core.tasks" in imported

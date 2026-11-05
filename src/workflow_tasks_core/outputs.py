@@ -1,17 +1,17 @@
 """Work out what a task wrote from the arguments it was run with.
 
-Fractal tasks name their outputs from their arguments, so the plugin can
-show exactly those outputs after a run instead of guessing:
+Fractal tasks name their outputs from their arguments, so a run's outputs
+(``Task.outputs``) are exactly those, not a guess:
 
 - tables: ``table_name`` / ``output_table_name``, also inside argument
   models (e.g. ``create_masking_roi_table``);
 - label images: ``label_name`` / ``output_label_name``, where
   ``{channel_identifier}`` is the channel the task segmented
   (``channel.identifier``, or the first of ``channels.identifiers``);
-- new images: what the task reports in its ``--out-json`` file
-  (``image_list_updates``), plus ``output_image_suffix`` (written next to the
-  input as ``<image>_<suffix>``) and ``output_image_name`` templates that only
-  use ``{image_name}``.
+- new images: ``output_image_suffix`` (written next to the input as
+  ``<image>_<suffix>``) and ``output_image_name`` templates that only use
+  ``{image_name}`` (besides those the task reports in its
+  ``image_list_updates``).
 
 ``args`` are the arguments sent to the task. Arguments left at their default
 are not sent, so the schema default (in ``props``) is used for them.
@@ -19,14 +19,11 @@ are not sent, so the schema default (in ``props``) is used for them.
 
 from __future__ import annotations
 
-import json
 import os
 import string
-from dataclasses import dataclass
 from typing import Any, Optional
 
 from .schema import pick_variant, resolve, schema_variants, with_defs
-from .zarr_meta import list_labels
 
 LABEL_NAME_ARGS = ('label_name', 'output_label_name')
 # Arguments naming a table the task writes (also inside argument models,
@@ -143,29 +140,6 @@ def expected_image_urls(args: dict, props: dict, zarr_url: str) -> list[str]:
     return urls
 
 
-def read_image_list_updates(out_json: str) -> list[dict]:
-    """The ``image_list_updates`` in the task's ``--out-json`` file."""
-    try:
-        with open(out_json) as f:
-            metadata = json.load(f) or {}
-    except (OSError, ValueError):
-        return []
-    if not isinstance(metadata, dict):
-        return []
-    return [u for u in metadata.get('image_list_updates') or []
-            if isinstance(u, dict)]
-
-
-def reported_image_urls(out_json: str, zarr_url: str) -> list[str]:
-    """Images listed in the task's ``image_list_updates``, except the input."""
-    urls = []
-    for update in read_image_list_updates(out_json):
-        url = update.get('zarr_url')
-        if url and os.path.normpath(url) != os.path.normpath(zarr_url):
-            urls.append(url)
-    return urls
-
-
 def rewritten_inputs(
     image_list_updates: list[dict], input_urls: list[str]
 ) -> list[str]:
@@ -175,70 +149,3 @@ def rewritten_inputs(
     updated = {os.path.normpath(u['zarr_url'])
                for u in image_list_updates if u.get('zarr_url')}
     return [url for url in input_urls if os.path.normpath(url) in updated]
-
-
-# --------------------------------------------------------------------------
-# Outputs found on disk after a run
-# --------------------------------------------------------------------------
-
-
-@dataclass
-class TaskOutputs:
-    """What a run on one image wrote, going by its arguments and the disk."""
-
-    label_names: set[str]  # label images in the input image to show
-    image_urls: list[str]  # images to open
-    missing: list[str]     # expected outputs that are not on disk, as text
-    input_rewritten: bool = False  # the task rewrote the input image
-
-
-def find_task_outputs(
-    args: dict, props: dict, out_json: str, labels_before: set[str]
-) -> TaskOutputs:
-    """Outputs of a run on ``args['zarr_url']``: the labels named by its
-    arguments or new since ``labels_before``, the images it reports in its
-    ``--out-json`` file and the new images its arguments name."""
-    zarr_url = args['zarr_url']
-    labels_on_disk = set(list_labels(zarr_url))
-    expected_labels = expected_label_names(args, props)
-    label_names = (labels_on_disk & set(expected_labels)) | (
-        labels_on_disk - labels_before
-    )
-    missing = [f"label '{n}' in {zarr_url}"
-               for n in expected_labels if n not in labels_on_disk]
-
-    image_urls = reported_image_urls(out_json, zarr_url)
-    for url in expected_image_urls(args, props, zarr_url):
-        if os.path.isdir(url):
-            if url not in image_urls:
-                image_urls.append(url)
-        elif url not in image_urls:
-            missing.append(f"image {url}")
-    input_rewritten = bool(rewritten_inputs(
-        read_image_list_updates(out_json), [zarr_url]))
-    return TaskOutputs(label_names, image_urls, missing, input_rewritten)
-
-
-def new_label_names(
-    zarr_url: str, labels_before: set[str], args: dict, props: dict
-) -> set[str]:
-    """Label images of ``zarr_url`` to show after a run: those new since
-    ``labels_before`` and those named by the arguments."""
-    on_disk = set(list_labels(zarr_url))
-    names = on_disk - labels_before
-    names |= on_disk & set(expected_label_names(
-        {**args, 'zarr_url': zarr_url}, props))
-    return names
-
-
-def new_image_urls(
-    image_list_updates: list[dict], input_urls: list[str]
-) -> list[str]:
-    """Images in a run's ``image_list_updates`` that are not its inputs."""
-    input_set = {os.path.normpath(u) for u in input_urls}
-    new_urls = []
-    for update in image_list_updates:
-        url = update.get('zarr_url')
-        if url and os.path.normpath(url) not in input_set and url not in new_urls:
-            new_urls.append(url)
-    return new_urls

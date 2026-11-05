@@ -40,9 +40,6 @@ def test_progress_follows_install_log(panel):
     assert "Installing dependencies" in panel.status.text()
     assert panel.detail.text() == "✔ The default environment has been installed."
 
-    panel._on_install_log("Reading the task list")
-    assert panel.status.text().startswith("Reading the task list: my-tasks==1.1")
-
     panel._stop_busy()
     assert panel.progress.isHidden()
     assert panel.detail.isHidden()
