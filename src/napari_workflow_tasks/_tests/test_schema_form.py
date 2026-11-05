@@ -84,3 +84,43 @@ def test_map_and_optional_fields(qtbot):
     form.fields["diameter"].edit.setText("30")
     assert form.get_args() == {"profiles": {"A01_C01": "/profiles/a.zarr"}, "diameter": 30.0}
     assert form.fields["level"].spin.minimum() == 0
+
+
+def test_arrow_button(qtbot):
+    from qtpy.QtWidgets import QLabel
+
+    from napari_workflow_tasks._schema_form import ArrowButton, _Collapsible
+
+    button = ArrowButton("Log")
+    qtbot.addWidget(button)
+    states = []
+    button.toggled.connect(states.append)
+    assert (button.text(), button.isChecked()) == ("Log", False)
+    button.click()
+    button.setChecked(False)
+    assert states == [True, False]
+    button.setText("Show less")
+    assert button.text() == "Show less"
+
+    section = _Collapsible("Input", QLabel("x"), expanded=True)
+    qtbot.addWidget(section)
+    assert section.button.isChecked() and not section.frame.isHidden()
+    section.button.click()
+    assert section.frame.isHidden()
+
+
+def test_arrow_button_mouse_click_toggles_once(qtbot):
+    """A click on the arrow or on the text opens or closes it once."""
+    from qtpy.QtCore import QPoint, Qt
+
+    from napari_workflow_tasks._schema_form import ArrowButton
+
+    button = ArrowButton("Input")
+    qtbot.addWidget(button)
+    button.resize(200, button.sizeHint().height())
+    button.show()
+    middle = button.height() // 2
+    for x in (button.indentation() // 2, button.indentation() + 20):  # arrow, text
+        for expected in (True, False):
+            qtbot.mouseClick(button.viewport(), Qt.LeftButton, pos=QPoint(x, middle))
+            assert button.isChecked() is expected, (x, expected)

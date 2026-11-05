@@ -303,14 +303,42 @@ def get_display_info(pkg: TaskPackage, version: str) -> VersionInfo:
     )
 
 
-def docs_summary(docs: str) -> str:
-    """The first lines of a task's ``docs_info`` as one short plain-text
-    paragraph (headings and Markdown emphasis removed)."""
-    paragraphs = [p.strip() for p in docs.split('\n\n')]
-    lines = [ln for ln in '\n'.join(paragraphs).splitlines()
-             if ln.strip() and not ln.lstrip().startswith('#')]
-    first = ' '.join(
-        re.sub(r'^\s*[-*]\s+', '', ln) for ln in lines[:3]
-    ).strip()
-    first = re.sub(r'(\*\*|__|`)', '', first)
-    return first[:300] + ('…' if len(first) > 300 else '')
+def docs_text(docs: str) -> str:
+    """A task's ``docs_info`` as plain text: one paragraph per block of
+    lines (its lines joined; Markdown bullets and emphasis removed). A
+    heading at the top is left out; a later one starts its paragraph
+    ("Limitations: ...")."""
+    paragraphs, lines = [], []
+    heading = None
+
+    def end_paragraph():
+        nonlocal heading
+        if lines:
+            text = " ".join(lines)
+            paragraphs.append(f"{heading}: {text}" if heading else text)
+            lines.clear()
+            heading = None
+
+    for line in docs.splitlines():
+        line = line.strip()
+        if line.startswith("#"):
+            end_paragraph()
+            heading = line.lstrip("#").strip() if paragraphs else None
+        elif not line:
+            end_paragraph()
+        else:
+            lines.append(re.sub(r"^[-*]\s+", "", line))
+    end_paragraph()
+    return re.sub(r"(\*\*|__|`)", "", "\n\n".join(paragraphs))
+
+
+def docs_summary(docs: str, length: int = 300) -> str:
+    """The start of :func:`docs_text`: at most ``length`` characters, cut
+    after a word, with "…" if there is more."""
+    text = docs_text(docs)
+    if len(text) <= length:
+        return text
+    cut = text[:length]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut + "…"

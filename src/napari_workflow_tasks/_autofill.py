@@ -1,6 +1,8 @@
 """
-Keep a task form's channel fields in step with the input channel selected in
-the plugin's Main tab.
+Fill a task's arguments for the user, as long as they have not typed their
+own value: the channel fields follow the input layer's channel
+(``ChannelAutofill``), and arguments whose default names other arguments
+follow those (``PlaceholderAutofill``).
 """
 
 import re
@@ -8,7 +10,16 @@ import re
 from workflow_tasks_core.outputs import CHANNEL_PLACEHOLDER, LABEL_NAME_ARGS
 from workflow_tasks_core.schema import SchemaError
 
-from ._schema_form import ListField, StringField
+from ._schema_form import (
+    ListField,
+    ObjectField,
+    OptionalField,
+    StringField,
+    UnionField,
+)
+
+# "{name}" in a default
+PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
 # Fields that take channel names: offer the input image's channels
 CHANNEL_FIELDS = ('identifiers', 'label', 'channel_label', 'channel_labels')
@@ -29,6 +40,19 @@ def input_channel(layer_name, channels):
         if name in channels:
             return name
     return None
+
+
+def _unedited(field, last_filled):
+    """True while the user has not typed their own value: the text field is
+    empty, at its default or holds ``last_filled``."""
+    text = field.edit.text().strip()
+    default = field.schema.get('default')
+    if isinstance(default, list):
+        default = ', '.join(map(str, default))
+    auto = {'', last_filled}
+    if isinstance(default, str):
+        auto.add(default)
+    return text in auto
 
 
 class ChannelAutofill:
@@ -80,14 +104,7 @@ class ChannelAutofill:
 
     def _is_auto(self, field):
         """True while the user has not typed their own value."""
-        text = field.edit.text().strip()
-        default = field.schema.get('default')
-        if isinstance(default, list):
-            default = ', '.join(map(str, default))
-        auto = {'', self._filled.get(id(field))}
-        if isinstance(default, str):
-            auto.add(default)
-        return text in auto
+        return _unedited(field, self._filled.get(id(field)))
 
     def _fill(self, field, value):
         if not self._is_auto(field):
@@ -128,3 +145,70 @@ class ChannelAutofill:
         for field in self._identifiers:
             self._fill(field, [channel] if isinstance(field, ListField) else channel)
         self._fill_labels()
+
+
+def _text_fields(fields):
+    """(key, field) of every text field among ``fields``, also inside
+    argument models."""
+    for key, field in fields.items():
+        if isinstance(field, StringField):
+            yield key, field
+        elif isinstance(field, OptionalField):
+            yield from _text_fields({key: field.inner})
+        elif isinstance(field, ObjectField):
+            yield from _text_fields(field.form.fields)
+        elif isinstance(field, UnionField):
+            for variant in field.fields:
+                yield from _text_fields({key: variant})
+
+
+def _text_value(field):
+    """The value of a field as text; None if it has none, or if it is a
+    template itself that is not filled in yet."""
+    try:
+        value = field.value()
+    except SchemaError:
+        return None
+    if not isinstance(value, (str, int, float)) or str(value) == '':
+        return None
+    if PLACEHOLDER.search(str(value)):
+        return None
+    return str(value)
+
+
+class PlaceholderAutofill:
+    """Fill the text fields whose default names other arguments of the task,
+    also inside argument models: e.g. Find Registration Consensus's
+    ``registered_roi_table = "{input_roi_table}_registered"`` follows
+    ``input_roi_table``. A field is only overwritten while it is empty, at
+    its default, or still holds the value last filled in.
+
+    ``fields``: the arguments of the task (the top-level fields of its
+    forms); placeholders that are no argument (e.g. ``{image_name}``, which
+    the task fills per image) are left to the task."""
+
+    def __init__(self, fields):
+        self._arguments = fields
+        self._templates = []  # (field, template, argument names)
+        self._filled = {}     # id(field) -> text last filled in
+        for key, field in _text_fields(fields):
+            default = field.schema.get('default')
+            if not isinstance(default, str):
+                continue
+            names = set(PLACEHOLDER.findall(default))
+            if names and names <= set(fields) - {key}:
+                self._templates.append((field, default, names))
+        for name in {n for _field, _template, names in self._templates
+                     for n in names}:
+            fields[name].changed.connect(self.fill)
+        self.fill()
+
+    def fill(self, *_):
+        for field, template, names in self._templates:
+            values = {name: _text_value(self._arguments[name]) for name in names}
+            if None in values.values():
+                continue
+            if _unedited(field, self._filled.get(id(field))):
+                text = template.format(**values)
+                field.set_value(text)
+                self._filled[id(field)] = text
