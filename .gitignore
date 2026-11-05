@@ -96,6 +96,7 @@ venv/
 CLAUDE.md
 CLAUDE.local.md
 *-SKILL.md
+docs/superpowers/
 
 # Output of task runs
 out-json-file.json
