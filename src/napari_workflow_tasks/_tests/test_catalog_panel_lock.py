@@ -1,0 +1,131 @@
+"""Headless CatalogPanel: the "Use the package's pixi.lock" checkbox greys
+out extras (not pins: pinned versions win) for locked releases and reaches
+install_version."""
+import pytest
+
+from workflow_tasks_core import install, manifests, paths, task_packages
+
+pytest.importorskip("napari")
+
+
+def _pkg(lock):
+    versions = [
+        task_packages.PackageVersion("1.1", "https://x/my_tasks-1.1-py3-none-any.whl",
+                                     "my_tasks-1.1-py3-none-any.whl", pixi_lock=lock),
+        task_packages.PackageVersion("1.0", "https://x/my_tasks-1.0-py3-none-any.whl",
+                                     "my_tasks-1.0-py3-none-any.whl", pixi_lock=False),
+    ]
+    return task_packages.TaskPackage("https://pypi.org/project/cellpose-like", "pypi",
+                                     "fractal-cellpose-sam-task", versions)
+
+
+@pytest.fixture
+def panel(qtbot, tmp_path, monkeypatch):
+    from napari_workflow_tasks._catalog_panel import CatalogPanel
+
+    monkeypatch.setattr(paths, "ENVS_DIR", tmp_path / "envs")
+    monkeypatch.setattr(paths, "CATALOG_CACHE_DIR", tmp_path / "catalog")
+    w = CatalogPanel()
+    qtbot.addWidget(w)
+    pkg = _pkg(True)
+    w._packages[pkg.pkg_name] = pkg
+    info = manifests.VersionInfo({"task_list": [
+        {"name": "T", "executable_parallel": "t.py"}]}, "my_tasks",
+        "my_tasks/__FRACTAL_MANIFEST__.json", [], ">=3.11")
+    w._infos[(pkg.pkg_name, "1.1")] = info
+    w._infos[(pkg.pkg_name, "1.0")] = info
+    w._add_package_row(pkg)
+    w.tree.setCurrentItem(w._items[pkg.pkg_name])
+    return w, pkg
+
+
+def test_lock_hint(panel):
+    w, pkg = panel
+    assert "🔒" in w._combos[pkg.pkg_name].itemText(0)
+    assert w.lock_check.isChecked()
+    # locked release: extras greyed out; pins always used (pre-filled with
+    # the suggested pins), they decide whether the lock is used as is
+    assert not w.extras_edit.isEnabled()
+    assert "falls back" in w.extras_edit.toolTip()
+    assert w.pins_edit.isEnabled()
+    assert w.pins_edit.text() == "cellpose<4.2"
+    assert "satisfies the pins" in w.pins_edit.toolTip()
+    assert "always win" in w.pins_edit.toolTip()
+    tip = w.lock_check.toolTip()
+    assert "pinned packages are not used" not in tip
+    assert "pip extras are not used" in tip and "Pinned packages win" in tip
+    w.lock_check.setChecked(False)
+    assert w.pins_edit.isEnabled() and w.extras_edit.isEnabled()
+    assert "satisfies the pins" not in w.pins_edit.toolTip()
+    w.lock_check.setChecked(True)
+    assert w.pins_edit.isEnabled() and not w.extras_edit.isEnabled()
+    # a version without a lock: everything editable
+    w._combos[pkg.pkg_name].setCurrentIndex(1)
+    assert w.pins_edit.isEnabled() and w.extras_edit.isEnabled()
+    assert w.extras_edit.toolTip() == "Available extras: none"
+    assert "satisfies the pins" not in w.pins_edit.toolTip()
+
+
+@pytest.mark.parametrize("checked", [True, False])
+def test_checkbox_reaches_install_version(panel, qtbot, monkeypatch, checked):
+    w, pkg = panel
+    calls = []
+
+    def fake_install(pkg_, version, extras=None, log=print, pins=None,
+                     use_lock=True, skip=None):
+        calls.append((version, extras, pins, use_lock, skip))
+        return {"src_path": "/x", "manifest_path": "/x/m.json",
+                "pixi_manifest_path": "/x/pixi.toml", "version": version,
+                "pixi_frozen": use_lock, "env_kind": "pixi.lock" if use_lock else "resolved",
+                "pins_applied": {"pins": pins, "how": "x"}}
+
+    monkeypatch.setattr(install, "install_version", fake_install)
+    monkeypatch.setattr(manifests, "get_version_info", lambda p, v: w._infos[(p.pkg_name, v)])
+    w.lock_check.setChecked(checked)
+    with qtbot.waitSignal(w.installed, timeout=10000):
+        w._install_selected()
+    assert calls == [("1.1", [], ["cellpose<4.2"], checked, [])]
+    assert ("from its pixi.lock" in w.status.text()) == checked
+    assert "pinned: cellpose<4.2" in w.status.text()
+
+
+def test_skipped_packages_reach_install_version(panel, qtbot, monkeypatch):
+    w, pkg = panel
+    monkeypatch.setattr(install, "suggested_skip", lambda name: ["cupy-cuda12x"])
+    w._update_extras_suggestion()
+    assert w.skip_edit.text() == "cupy-cuda12x"
+    calls = []
+
+    def fake_install(pkg_, version, extras=None, log=print, pins=None,
+                     use_lock=True, skip=None):
+        calls.append(skip)
+        return {"src_path": "/x", "manifest_path": "/x/m.json",
+                "pixi_manifest_path": "/x/pixi.toml", "version": version,
+                "pixi_frozen": False, "env_kind": "resolved",
+                "pins_applied": None, "skipped": skip}
+
+    monkeypatch.setattr(install, "install_version", fake_install)
+    monkeypatch.setattr(manifests, "get_version_info", lambda p, v: w._infos[(p.pkg_name, v)])
+    with qtbot.waitSignal(w.installed, timeout=10000):
+        w._install_selected()
+    assert calls == [["cupy-cuda12x"]]
+    assert "skipped: cupy-cuda12x" in w.status.text()
+
+
+def test_status_says_why_the_lock_was_not_used(panel, qtbot, monkeypatch):
+    w, pkg = panel
+
+    def fake_install(pkg_, version, extras=None, log=print, pins=None,
+                     use_lock=True, skip=None):
+        return {"src_path": "/x", "manifest_path": "/x/m.json",
+                "pixi_manifest_path": "/x/pixi.toml", "version": version,
+                "pixi_frozen": False, "env_kind": "resolved",
+                "pins_applied": None, "skipped": [],
+                "lock_note": "its pixi.lock could not be checked (timed out)"}
+
+    monkeypatch.setattr(install, "install_version", fake_install)
+    monkeypatch.setattr(manifests, "get_version_info", lambda p, v: w._infos[(p.pkg_name, v)])
+    with qtbot.waitSignal(w.installed, timeout=10000):
+        w._install_selected()
+    assert "not from its pixi.lock" in w.status.text()
+    assert "could not be checked" in w.status.text()
