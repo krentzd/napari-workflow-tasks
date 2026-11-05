@@ -254,6 +254,9 @@ if args[0] == "install":
     if "--frozen" in args and os.environ.get("FAKE_PIXI_FAIL_FROZEN"):
         print("lock file does not contain platform osx-arm64"); sys.exit(1)
     (manifest.parent / ".pixi" / "envs" / "default").mkdir(parents=True, exist_ok=True)
+    lock = manifest.parent / "pixi.lock"
+    if "--frozen" not in args and not lock.exists():
+        lock.write_text("version: 6\n")  # like pixi: a solve writes the lock
 elif args[0] == "run":
     print("PKGDIR=" + str(manifest.parent / "site-packages" / args[-1]))
 """
@@ -329,6 +332,13 @@ def test_failed_lock_install_falls_back(fake_pixi, monkeypatch):
 
     assert entry["pixi_frozen"] is False
     assert not (paths.env_dir("my-tasks", "1.2.0") / "source").exists()
+    # The release ships a pixi.lock: the fallback is not cached, so the next
+    # install tries the pixi.lock again, and the install log says why
+    assert "recipe_key" not in entry
+    assert not list(paths.recipes_dir().glob("*.json"))
+    log_file = paths.env_dir("my-tasks", "1.2.0") / install.INSTALL_LOG
+    assert str(log_file) in entry["lock_note"]
+    assert "lock file does not contain platform" in log_file.read_text()
 
 
 def test_unavailable_source_is_not_cached(fake_pixi, monkeypatch):
@@ -350,6 +360,7 @@ def test_release_without_lock_is_cached_with_note(fake_pixi, monkeypatch):
     monkeypatch.setattr(task_packages, "http_get", lambda url, headers=None: archive)
     entry = install.install_version(_pkg_with_source(archive), "1.2.0", log=lambda _l: None)
     assert entry["lock_note"] == "this release ships no pixi.lock"
+    assert "recipe_key" in entry  # a release without a lock is cached
 
 
 def test_lock_install_has_no_note(fake_pixi, monkeypatch):

@@ -692,7 +692,8 @@ class Task:
 
     def show(self, viewer=None):
         """Open the input images with the labels this run wrote, and its new
-        images, in napari (a new viewer unless ``viewer`` is given). Needs
+        images, in napari: in ``viewer`` if given, else in the current
+        viewer, else in a new one. Returns the viewer. Needs
         the napari plugin (napari-workflow-tasks) and napari installed."""
         outputs = self.outputs()
         try:

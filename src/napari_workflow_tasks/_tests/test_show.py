@@ -38,3 +38,24 @@ def test_show_new_images_with_suffix(env):  # noqa: F811
 def test_show_before_run(env):  # noqa: F811
     with pytest.raises(RuntimeError, match="run the task first"):
         Package.installed("fake-tasks").task("Segment").show(ViewerModel())
+
+
+def test_show_reads_data_a_task_rewrote(env):  # noqa: F811
+    """napari's dask chunk cache must not show the data from before a task
+    replaced it (e.g. Apply Registration with overwrite_input=True)."""
+    import numpy as np
+    import zarr
+
+    from napari_workflow_tasks._show import show_outputs
+
+    empty = {"labels": [], "tables": [], "images": []}
+    before = show_outputs([env["url"]], empty, viewer=ViewerModel())
+    assert not np.all(before.layers[0]._data_view == 7)  # sliced: now cached
+
+    group = zarr.open_group(env["url"], mode="r+")
+    for path in [ds["path"] for ds in
+                 dict(group.attrs)["multiscales"][0]["datasets"]]:
+        group[path][:] = 7
+
+    after = show_outputs([env["url"]], empty, viewer=ViewerModel())
+    assert np.all(after.layers[0]._data_view == 7)

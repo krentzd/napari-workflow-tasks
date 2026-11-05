@@ -105,12 +105,14 @@ def suggested_skip(pkg_name: str) -> list[str]:
 def _run_streaming(
     cmd: list[str], log: Callable[[str], None], env: Optional[dict] = None
 ) -> str:
+    """Run ``cmd`` (with the variables in ``env`` added to pixi_env()),
+    logging its output lines; returns the output."""
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        env=env,
+        env=pixi_config.pixi_env(env),
     )
     lines = []
     assert proc.stdout is not None
@@ -303,6 +305,9 @@ def check_env(
 # --------------------------------------------------------------------------
 
 INCOMPLETE_MARKER = ".install_incomplete"
+# Everything the last install of a (package, version) logged, kept in its
+# env folder: it says why a pixi.lock was not used
+INSTALL_LOG = "install.log"
 SOURCE_SUBDIR = "source"  # source archive -> env_dir(pkg, ver)/source/<top>/
 
 # Kinds of environments (entry["env_kind"])
@@ -357,10 +362,10 @@ def _extract_source(archive: bytes, src_dir: Path) -> Path:
 
 
 def _source_build_env(pkg: TaskPackage, version: str) -> dict:
-    """Environment for building the package from GitHub's tag archive: it
+    """Variables for building the package from GitHub's tag archive: it
     has no PKG-INFO and no .git, so hatch-vcs / setuptools-scm can't tell
     the version without being told."""
-    env = dict(os.environ)
+    env = {}
     env["SETUPTOOLS_SCM_PRETEND_VERSION"] = version
     key = re.sub(r"[^A-Z0-9]+", "_", pkg.pkg_name.upper())
     env[f"SETUPTOOLS_SCM_PRETEND_VERSION_FOR_{key}"] = version
@@ -415,6 +420,24 @@ def _prepare_source(
         shutil.rmtree(src_dir, ignore_errors=True)
         return None, "this release ships no pixi.lock"
     return _Source(project, manifest, url, env), None
+
+
+def _log_to_file(log: Callable[[str], None], path: Path) -> Callable[[str], None]:
+    """``log`` that also writes every line to ``path`` (started afresh)."""
+    try:
+        path.write_text("")
+    except OSError:
+        return log
+
+    def log_and_write(line: str) -> None:
+        log(line)
+        try:
+            with open(path, "a") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
+    return log_and_write
 
 
 def _pins_text(pins) -> str:
@@ -849,6 +872,7 @@ def install_version(
     pixi = pixi_config.find_pixi()
     d = env_dir(pkg.pkg_name, version)
     d.mkdir(parents=True, exist_ok=True)
+    log = _log_to_file(log, d / INSTALL_LOG)
     incomplete = d / INCOMPLETE_MARKER
     incomplete.write_text(
         "Install started " + time.strftime("%Y-%m-%d %H:%M:%S") + "\n"
@@ -890,8 +914,9 @@ def install_version(
 
     entry = new_recipe = None
     lock_note = None  # why the env is not from the release's pixi.lock
-    # A fallback after a passing problem (e.g. the network) is not saved
-    # as the recipe, so that the next install tries the pixi.lock again
+    # A fallback is not saved as the recipe when the release may have a
+    # usable pixi.lock (it could not be checked, or installing it failed),
+    # so that the next install tries the pixi.lock again
     cache_install = True
     if use_lock:
         src = None
@@ -917,7 +942,8 @@ def install_version(
                 entry, new_recipe = result
             else:
                 lock_note = ("its pixi.lock could not be used on this "
-                             "computer (see the install log)")
+                             f"computer (see {d / INSTALL_LOG})")
+                cache_install = False
                 log("Falling back to resolving dependencies")
                 shutil.rmtree(d / SOURCE_SUBDIR, ignore_errors=True)
 

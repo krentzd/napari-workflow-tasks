@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
 
+from .pixi_config import pixi_env
+
 # ---------------------------------------------------------------------------
 # Task kinds
 # ---------------------------------------------------------------------------
@@ -169,7 +171,7 @@ def task_command(
 
 def stream_process(cmd: list[str]) -> Iterator[str]:
     """Run a command, yielding its output lines; returns the exit code."""
-    env = dict(os.environ, PYTHONUNBUFFERED='1')
+    env = pixi_env({'PYTHONUNBUFFERED': '1'})
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, env=env,
@@ -183,7 +185,7 @@ def _stream(cmd: list[str]) -> Iterator[str]:
     """Like :func:`stream_process`, but raises :class:`TaskFailed` with the
     last non-empty output line if the command fails, instead of returning
     the exit code."""
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    env = pixi_env({"PYTHONUNBUFFERED": "1"})
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, env=env,

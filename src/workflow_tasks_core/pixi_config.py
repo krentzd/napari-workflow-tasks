@@ -63,10 +63,37 @@ def find_pixi() -> str:
     )
 
 
+# Variables that make a Python process act as another Python. napari's
+# macOS relaunch sets PYTHONEXECUTABLE to its own Python: inherited by pixi,
+# it made the build environments uv creates use the plugin's Python, so
+# installing a package from its pixi.lock failed ("No module named
+# 'hatchling'").
+PYTHON_REDIRECT_VARS = (
+    "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__", "PYTHONHOME", "PYTHONPATH",
+)
+
+
+def pixi_env(extra: Optional[dict] = None) -> dict:
+    """Environment for the pixi commands of task packages: ours without
+    PYTHON_REDIRECT_VARS, so that their Pythons are their own, and without
+    a ``module://`` MPLBACKEND, plus ``extra``.
+
+    Jupyter kernels set MPLBACKEND=module://matplotlib_inline.backend_inline;
+    a task environment has no matplotlib_inline, so importing matplotlib
+    there failed ("... is not a valid value for backend")."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in PYTHON_REDIRECT_VARS}
+    if env.get("MPLBACKEND", "").startswith("module://"):
+        del env["MPLBACKEND"]
+    env.update(extra or {})
+    return env
+
+
 def pixi_version(pixi: str) -> str:
     try:
         out = subprocess.run(
-            [pixi, "--version"], capture_output=True, text=True, timeout=30
+            [pixi, "--version"], capture_output=True, text=True, timeout=30,
+            env=pixi_env(),
         )
         return out.stdout.strip() or "unknown"
     except (OSError, subprocess.SubprocessError):
@@ -141,7 +168,7 @@ def host_system_requirements(
     try:
         out = subprocess.run(
             [find_pixi(), "info", "--json"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=60, env=pixi_env(),
         )
         virtual = json.loads(out.stdout).get("virtual_packages") or []
     except (OSError, subprocess.SubprocessError, ValueError,
@@ -868,6 +895,7 @@ def locked_versions(pixi: str, manifest: Path) -> dict[str, str]:
     out = subprocess.run(
         [pixi, "list", "--frozen", "--json", "--manifest-path", str(manifest)],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        env=pixi_env(),
     )
     try:
         return {
@@ -890,6 +918,7 @@ def lock_package_versions(
             [pixi, "list", "--frozen", "--json", "--environment", environment,
              "--platform", platform_name, "--manifest-path", str(manifest)],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            env=pixi_env(),
             timeout=300,
         )
         rows = json.loads(out.stdout)

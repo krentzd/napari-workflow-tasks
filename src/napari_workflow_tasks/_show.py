@@ -25,6 +25,15 @@ def _layers(zarr_url: str):
         yield data, meta, layer_type
 
 
+def _forget_cached_chunks() -> None:
+    """Empty napari's dask chunk cache. Its keys depend on the zarr path,
+    not on the data, so after a task rewrote an image in place (e.g. Apply
+    Registration) napari would otherwise show chunks read before the run."""
+    from napari.utils import resize_dask_cache
+
+    resize_dask_cache().cache.clear()
+
+
 def show_outputs(inputs: list[str], outputs: dict, viewer=None,
                  ) -> "napari.Viewer":  # noqa: F821
     """Add the run's images to ``viewer`` (default: the current viewer, else
@@ -34,6 +43,7 @@ def show_outputs(inputs: list[str], outputs: dict, viewer=None,
 
     if viewer is None:
         viewer = napari.current_viewer() or napari.Viewer()
+    _forget_cached_chunks()
 
     labels: dict[str, set] = {}
     for path in outputs.get("labels", []):
