@@ -39,17 +39,23 @@ from qtpy.QtWidgets import (
 
 from workflow_tasks_core import SchemaError, Task
 from workflow_tasks_core.args_io import args_filename
-from workflow_tasks_core.manifests import docs_summary
+from workflow_tasks_core.manifests import docs_summary, docs_text
 from workflow_tasks_core.rois import write_roi_table
 from workflow_tasks_core.runner import default_zarr_dir, short_name
 from workflow_tasks_core.zarr_meta import channel_labels
 
-from ._autofill import CHANNEL_FIELDS, ChannelAutofill, input_channel
+from ._autofill import (
+    CHANNEL_FIELDS,
+    ChannelAutofill,
+    PlaceholderAutofill,
+    input_channel,
+)
 from ._schema_form import (
     ObjectField,
     OptionalField,
     SchemaForm,
     StringField,
+    ArrowButton,
     _Collapsible,
 )
 from ._show import image_layer_names, layer_image_url, show_run
@@ -278,8 +284,17 @@ class TaskTab(QWidget):
         self._started = 0.0
         self._blocked = False  # another task is running
 
-        layout = QVBoxLayout(self)
+        # The whole tab scrolls, so nothing is squeezed in a small dock
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(10, 10, 10, 10)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(content)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
         self._add_header(layout)
 
         # Input images
@@ -340,6 +355,7 @@ class TaskTab(QWidget):
         self.log.setMinimumHeight(160)
         self.log_section = _Collapsible("Log", self.log, expanded=False)
         layout.addWidget(self.log_section)
+        layout.addStretch(1)
 
         self._update_channel()
         self._update_run_button()
@@ -356,22 +372,34 @@ class TaskTab(QWidget):
         return label
 
     def _add_header(self, layout):
-        """Name, package and version, short docs."""
+        """Name, package and version, its description (a summary, with a
+        button that shows all of it)."""
         title = QLabel(self.task.name)
         title.setFont(QFont("Arial", 14, weight=QFont.Bold))
         title.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(self._gray_label(self.task.package.key))
-        docs = self.task.docs_info.strip()
-        if docs:
-            docs_label = QLabel(docs_summary(docs))
-            docs_label.setWordWrap(True)
-            docs_label.setToolTip(docs[:3000])
-            layout.addWidget(docs_label)
+        # Its description: the start, and a button that shows all of it
+        self.docs_toggle = None
+        self._docs_full = docs_text(self.task.docs_info)
+        self._docs_short = docs_summary(self.task.docs_info)
+        if self._docs_full:
+            self.docs = QLabel(self._docs_short)
+            self.docs.setWordWrap(True)
+            layout.addWidget(self.docs)
+        if self._docs_short != self._docs_full:
+            self.docs_toggle = ArrowButton("Show more", bold=False,
+                                           color="#0d6efd")
+            self.docs_toggle.toggled.connect(self._show_full_docs)
+            layout.addWidget(self.docs_toggle, alignment=Qt.AlignLeft)
         if self.task.docs_link:
             link = QLabel(f'<a href="{self.task.docs_link}">Documentation</a>')
             link.setOpenExternalLinks(True)
             layout.addWidget(link)
+
+    def _show_full_docs(self, show):
+        self.docs.setText(self._docs_full if show else self._docs_short)
+        self.docs_toggle.setText("Show less" if show else "Show more")
 
     def _add_roi_section(self, layout):
         """Draw ROIs in a Shapes layer and save them as an ROI table of the
@@ -431,11 +459,11 @@ class TaskTab(QWidget):
             params_layout.addWidget(_Collapsible(
                 "Compute (runs per image)", self.form, expanded=True))
             params_layout.addStretch(1)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setWidget(params)
-        layout.addWidget(scroll, 1)
+        fields = {}
+        for form in self._forms():
+            fields.update(form.fields)
+        self._placeholders = PlaceholderAutofill(fields)
+        layout.addWidget(params)
 
     def _add_buttons(self, layout):
         # Import/export of arguments (Fractal's arguments file format)
@@ -476,6 +504,7 @@ class TaskTab(QWidget):
     def reset(self):
         for form in self._forms():
             form.reset()
+        self._placeholders.fill()
 
     def disconnect_viewer(self):
         """Stop following the viewer's layers (before removing the tab)."""
@@ -747,6 +776,7 @@ class TaskTab(QWidget):
                     notes.append(f"could not set {key} to {value!r}")
             if unknown:
                 notes.append("unknown arguments ignored: " + ", ".join(unknown))
+        self._placeholders.fill()  # arguments left out: from the imported ones
 
         errors = []
         for form in self._forms():

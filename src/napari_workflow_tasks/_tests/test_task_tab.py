@@ -213,3 +213,36 @@ def test_roi_table_fills_iterate_over_rois(qtbot, tmp_path, fake_package,
     args = tab.form.body.values(omit_defaults=True)
     assert args["iterator_configuration"]["roi_table"] == "my_rois"
     assert "set iterator_configuration.roi_table" in tab.status.text()
+
+
+def test_full_description(qtbot, fake_package):
+    """"Show more" continues the summary in the same label and style."""
+    docs = ("### Purpose\n- **Applies** the registration to the images of "
+            "a plate. " + "More about it. " * 20 + "\n- Masks regions.\n\n"
+            "### Limitations\n- Only HCS plates.")
+    widget = TasksQWidget(ViewerModel())
+    qtbot.addWidget(widget)
+    widget.add_package(fake_package([
+        {"name": "Long", "executable_parallel": "l.py", "docs_info": docs,
+         "args_schema_parallel": PARALLEL},
+        {"name": "Short", "executable_parallel": "s.py",
+         "docs_info": "Segments nuclei.", "args_schema_parallel": PARALLEL},
+    ]))
+    widget.open_task("Long [p==1.0]")
+    tab = widget._tabs["Long [p==1.0]"]
+    full = ("Applies the registration to the images of a plate. "
+            + "More about it. " * 20 + "Masks regions.\n\n"
+            "Limitations: Only HCS plates.")
+    short = tab.docs.text()
+    assert short.endswith("…") and len(short) <= 301
+    assert full.startswith(short[:-1])  # the summary is how it starts
+    tab.docs_toggle.click()
+    assert tab.docs.text() == full
+    assert tab.docs_toggle.text() == "Show less"
+    tab.docs_toggle.click()
+    assert tab.docs.text() == short
+
+    widget.open_task("Short [p==1.0]")
+    short = widget._tabs["Short [p==1.0]"]
+    assert short.docs.text() == "Segments nuclei."
+    assert short.docs_toggle is None  # nothing more to show

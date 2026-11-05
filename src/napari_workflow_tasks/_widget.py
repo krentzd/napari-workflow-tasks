@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from qtpy.QtCore import Qt
+from qtpy.QtCore import QSize, Qt
 from qtpy.QtGui import QBrush, QColor, QFont, QPixmap
 from qtpy.QtWidgets import (
     QComboBox,
@@ -44,6 +44,10 @@ class TasksQWidget(QWidget):
     task packages and their tasks, and one tab per opened task, with that
     task's input and ROI table. Packages are added in a separate window
     (``CatalogDialog``)."""
+
+    # Width napari gives the dock when it opens: room for the package list
+    # and the task forms (it can still be made narrower)
+    PREFERRED_WIDTH = 500
 
     def __init__(self, napari_viewer):
         super().__init__()
@@ -108,7 +112,6 @@ class TasksQWidget(QWidget):
 
         # ---------------- Main tab ----------------
         main = QWidget()
-        main.setMinimumWidth(400)
         main_layout = QVBoxLayout(main)
         main_layout.setSpacing(15)
         main_layout.setContentsMargins(15, 15, 15, 15)
@@ -128,6 +131,10 @@ class TasksQWidget(QWidget):
         for package in Catalog.installed():  # no network
             self.add_package(package)
         self._update_open_button()
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        return QSize(max(hint.width(), self.PREFERRED_WIDTH), hint.height())
 
     # ------------------------------------------------------------------
     # Loaded packages

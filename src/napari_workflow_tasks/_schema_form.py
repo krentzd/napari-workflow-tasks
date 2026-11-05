@@ -30,9 +30,10 @@ import json
 import re
 from typing import Any, Optional
 
-from qtpy.QtCore import Qt, Signal
-from qtpy.QtGui import QDoubleValidator, QIntValidator
+from qtpy.QtCore import QSize, Qt, Signal
+from qtpy.QtGui import QBrush, QColor, QDoubleValidator, QFontMetrics, QIntValidator
 from qtpy.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QCompleter,
@@ -42,8 +43,11 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QSizePolicy,
     QSpinBox,
     QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -821,16 +825,86 @@ def build_field(
 # --------------------------------------------------------------------------
 
 
+class ArrowButton(QTreeWidget):
+    """A one-line tree used as a toggle button: its arrow is a tree branch
+    arrow (pointing down while checked, right otherwise), so it looks
+    exactly like the arrows of the package trees in every style and theme.
+    A click anywhere on it toggles it. It has the button methods used here:
+    ``text``, ``setText``, ``isChecked``, ``setChecked``, ``click`` and the
+    ``toggled`` signal."""
+
+    toggled = Signal(bool)
+
+    def __init__(self, text: str, bold: bool = True,
+                 color: Optional[str] = None, parent=None):
+        super().__init__(parent)
+        self.setHeaderHidden(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setSelectionMode(QAbstractItemView.NoSelection)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setStyleSheet("QTreeWidget { background: transparent; border: none; }")
+        self.viewport().setCursor(Qt.PointingHandCursor)
+        # One row; its hidden child makes the tree draw its arrow, also
+        # while expanded
+        self._item = QTreeWidgetItem([text])
+        hidden_child = QTreeWidgetItem()
+        self._item.addChild(hidden_child)
+        hidden_child.setHidden(True)
+        font = self._item.font(0)
+        font.setBold(bold)
+        self._item.setFont(0, font)
+        if color:
+            self._item.setForeground(0, QBrush(QColor(color)))
+        self.addTopLevelItem(self._item)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.setFixedHeight(self.sizeHintForRow(0) + 2)
+        self.itemExpanded.connect(lambda _item: self.toggled.emit(True))
+        self.itemCollapsed.connect(lambda _item: self.toggled.emit(False))
+
+    def text(self) -> str:
+        return self._item.text(0)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
+        self._item.setText(0, text)
+        self.updateGeometry()
+
+    def isChecked(self) -> bool:  # noqa: N802
+        return self._item.isExpanded()
+
+    def setChecked(self, checked: bool) -> None:  # noqa: N802
+        self._item.setExpanded(checked)
+
+    def click(self) -> None:
+        self.setChecked(not self.isChecked())
+
+    def sizeHint(self):  # noqa: N802 - as wide as the arrow and the text
+        width = (self.indentation()
+                 + QFontMetrics(self._item.font(0)).horizontalAdvance(self.text())
+                 + 12)
+        return QSize(width, self.sizeHintForRow(0) + 2)
+
+    # Each click toggles it once, wherever it is (also a fast second click).
+    # The tree's own handling of the mouse is not used: on macOS it also
+    # expands or collapses the row when the button is released on the arrow.
+    def mousePressEvent(self, event):  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.click()
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.click()
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        pass
+
+
 class _Collapsible(QWidget):
     def __init__(self, title: str, content: QWidget, expanded: bool, tooltip: str = ""):
         super().__init__()
-        self.button = QToolButton()
-        self.button.setText(title)
-        self.button.setCheckable(True)
+        self.button = ArrowButton(title)
         self.button.setChecked(expanded)
-        self.button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
-        self.button.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
         self.button.setToolTip(tooltip)
         self.content = content
         frame = QFrame()
@@ -845,11 +919,7 @@ class _Collapsible(QWidget):
         lay.addWidget(self.button)
         lay.addWidget(frame)
         frame.setVisible(expanded)
-        self.button.toggled.connect(self._toggle)
-
-    def _toggle(self, checked):
-        self.button.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
-        self.frame.setVisible(checked)
+        self.button.toggled.connect(self.frame.setVisible)
 
 
 def _is_group(field: Field) -> bool:
