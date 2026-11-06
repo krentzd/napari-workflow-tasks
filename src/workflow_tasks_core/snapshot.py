@@ -23,8 +23,8 @@ from .task_packages import PackageVersion, TaskPackage, fetch_sources
 
 # Snapshot published by .github/workflows/build_catalog.yaml (branch `catalog`)
 SNAPSHOT_URL = os.environ.get(
-    "NAPARI_WORKFLOW_TASKS_CATALOG_URL",
-    "https://raw.githubusercontent.com/rhornb/napari-workflow-tasks/catalog/",
+    "NAPARI_FRACTAL_TASKS_CATALOG_URL",
+    "https://raw.githubusercontent.com/rhornb/napari-fractal-tasks/catalog/",
 )
 SNAPSHOT_SCHEMA = 1
 

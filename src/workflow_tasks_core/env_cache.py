@@ -13,7 +13,7 @@ Three layers:
    install every regular ``.so``/``.dylib`` file of the env is either
    replaced by a hard link to an identical file in the store, or added to
    the store. Identical libraries are then shared between environments and
-   across re-installs. Disable with ``NAPARI_WORKFLOW_TASKS_DEDUP=0``.
+   across re-installs. Disable with ``NAPARI_FRACTAL_TASKS_DEDUP=0``.
 
    Safety: hard-linked files must never be written in place. pixi (conda
    and PyPI packages) removes files and creates new ones on updates, so
@@ -48,13 +48,13 @@ RECIPE_SCHEMA = 4  # 2: rich-platform manifests, pins_applied; 3: lock_note,
 # no recipe for a fallback after a failed pixi.lock check; 4: nor after a
 # failed install from the pixi.lock
 
-DEDUP_ENV_VAR = "NAPARI_WORKFLOW_TASKS_DEDUP"
-RECIPES_ENV_VAR = "NAPARI_WORKFLOW_TASKS_RECIPES"
+DEDUP_ENV_VAR = "NAPARI_FRACTAL_TASKS_DEDUP"
+RECIPES_ENV_VAR = "NAPARI_FRACTAL_TASKS_RECIPES"
 
 # libfoo.so, libfoo.so.1.2.3, libfoo.dylib, foo.cpython-312-darwin.so
 NATIVE_LIB_RE = re.compile(r"\.(?:so|dylib)(?:\.[0-9]+)*$")
 
-CHECK_MARKER = ".napari_workflow_tasks_check.json"
+CHECK_MARKER = ".napari_fractal_tasks_check.json"
 
 # os.link errors meaning "hard links are not possible here" (store on
 # another filesystem, filesystem without hard links, no permission).

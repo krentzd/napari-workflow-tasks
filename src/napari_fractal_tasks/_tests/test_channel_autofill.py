@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("napari")
-from napari_workflow_tasks._autofill import (  # noqa: E402
+from napari_fractal_tasks._autofill import (  # noqa: E402
     ChannelAutofill,
     input_channel,
 )
-from napari_workflow_tasks._schema_form import SchemaForm  # noqa: E402
+from napari_fractal_tasks._schema_form import SchemaForm  # noqa: E402
 
 DATA = Path(__file__).parent / "data"
 
@@ -175,7 +175,7 @@ def test_input_layer_drives_task_tab(qtbot, tmp_path, fake_package):
     import numpy as np
     from napari.components import ViewerModel
 
-    from napari_workflow_tasks._widget import TasksQWidget
+    from napari_fractal_tasks._widget import TasksQWidget
 
     zarr = tmp_path / "img.zarr"
     zarr.mkdir()

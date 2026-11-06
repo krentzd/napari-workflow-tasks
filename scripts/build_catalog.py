@@ -1,5 +1,5 @@
 """
-Build the Fractal task catalog snapshot used by napari-workflow-tasks.
+Build the Fractal task catalog snapshot used by napari-fractal-tasks.
 
 Same idea as the Fractal task page (fractal-analytics-platform.github.io,
 ``tasks_data_retrieval/create_tasks_data.py``), but for *every* version of

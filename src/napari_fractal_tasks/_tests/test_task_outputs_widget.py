@@ -14,8 +14,8 @@ from napari.layers._source import layer_source  # noqa: E402
 from napari_ome_zarr._reader import napari_get_reader  # noqa: E402
 from ngio import create_ome_zarr_from_array  # noqa: E402
 
-from napari_workflow_tasks import _show, _task_tab  # noqa: E402
-from napari_workflow_tasks._widget import TasksQWidget  # noqa: E402
+from napari_fractal_tasks import _show, _task_tab  # noqa: E402
+from napari_fractal_tasks._widget import TasksQWidget  # noqa: E402
 
 # Writes "<label_name with {channel_identifier}>" like the Fractal
 # segmentation tasks, unless WRITE is False

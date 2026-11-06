@@ -1,5 +1,5 @@
 [project]
-name = "napari-workflow-tasks"
+name = "napari-fractal-tasks"
 dynamic = ["version"]
 description = "Install and run Fractal tasks on OME-Zarr images in napari"
 readme = "README.md"
@@ -41,13 +41,13 @@ testing = [
 ]
 
 [project.entry-points."napari.manifest"]
-napari-workflow-tasks = "napari_workflow_tasks:napari.yaml"
+napari-fractal-tasks = "napari_fractal_tasks:napari.yaml"
 
 [project.urls]
-"Bug Tracker" = "https://github.com/krentzd/napari-workflow-tasks/issues"
-"Documentation" = "https://github.com/krentzd/napari-workflow-tasks#README.md"
-"Source Code" = "https://github.com/krentzd/napari-workflow-tasks"
-"User Support" = "https://github.com/krentzd/napari-workflow-tasks/issues"
+"Bug Tracker" = "https://github.com/krentzd/napari-fractal-tasks/issues"
+"Documentation" = "https://github.com/krentzd/napari-fractal-tasks#README.md"
+"Source Code" = "https://github.com/krentzd/napari-fractal-tasks"
+"User Support" = "https://github.com/krentzd/napari-fractal-tasks/issues"
 
 [build-system]
 requires = ["setuptools>=77.0.0", "wheel"]
@@ -61,10 +61,10 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "*" = ["*.yaml"]
-napari_workflow_tasks = ["logo_images/*.png", "_tests/data/*.json"]
+napari_fractal_tasks = ["logo_images/*.png", "_tests/data/*.json"]
 
 [tool.setuptools.dynamic]
-version = {attr = "napari_workflow_tasks.__init__.__version__"}
+version = {attr = "napari_fractal_tasks.__init__.__version__"}
 
 [tool.black]
 line-length = 79
@@ -119,7 +119,7 @@ channels = ["conda-forge"]
 platforms = ["osx-arm64", "win-64", "linux-64"]
 
 [tool.pixi.pypi-dependencies]
-napari-workflow-tasks = { path = ".", editable = true }
+napari-fractal-tasks = { path = ".", editable = true }
 numpy = "*"
 packaging = "*"
 qtpy = "*"

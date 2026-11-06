@@ -5,11 +5,11 @@ import pytest
 
 pytest.importorskip("napari")
 
-from napari_workflow_tasks._autofill import (  # noqa: E402
+from napari_fractal_tasks._autofill import (  # noqa: E402
     ChannelAutofill,
     PlaceholderAutofill,
 )
-from napari_workflow_tasks._schema_form import SchemaForm  # noqa: E402
+from napari_fractal_tasks._schema_form import SchemaForm  # noqa: E402
 
 # fractal-tasks-core 2.1.0, Find Registration Consensus
 CONSENSUS = {
@@ -96,7 +96,7 @@ def test_in_a_task_tab(qtbot, fake_package):
     registered_roi_table follows."""
     from napari.components import ViewerModel
 
-    from napari_workflow_tasks._widget import TasksQWidget
+    from napari_fractal_tasks._widget import TasksQWidget
 
     widget = TasksQWidget(ViewerModel())
     qtbot.addWidget(widget)
