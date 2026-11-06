@@ -2,7 +2,7 @@ import logging
 from pathlib import Path
 
 from qtpy.QtCore import QSize, Qt
-from qtpy.QtGui import QBrush, QColor, QFont, QPixmap
+from qtpy.QtGui import QBrush, QColor, QFont, QIcon
 from qtpy.QtWidgets import (
     QComboBox,
     QGroupBox,
@@ -62,11 +62,17 @@ class TasksQWidget(QWidget):
 
         # ---------------- Title & logo ----------------
         main_title = QLabel("Fractal Task Launcher")
-        main_title.setFont(QFont('Arial', 16, weight=QFont.Bold))
-        logo_path = Path(__file__).parent / 'logo_images' / 'fractal_logo.png'
+        # A widget stylesheet, not setFont: napari's stylesheet sets the
+        # font size of every QLabel, which would override setFont.
+        main_title.setStyleSheet(
+            "font-family: Arial; font-size: 24pt; font-weight: bold;")
+        main_title.setAlignment(Qt.AlignCenter)
+        logo_path = (Path(__file__).parent / 'logo_images'
+                     / 'napari-fractal-tasks-logo.svg')
         logo = QLabel()
-        logo.setPixmap(QPixmap(str(logo_path)).scaled(
-            120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        # Rendering through QIcon draws the SVG at the target size
+        # (and screen scale), so it stays sharp.
+        logo.setPixmap(QIcon(str(logo_path)).pixmap(120, 120))
         logo.setFixedSize(130, 130)
 
         # ---------------- Loaded packages and their tasks ----------------

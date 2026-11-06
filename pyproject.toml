@@ -61,7 +61,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "*" = ["*.yaml"]
-napari_fractal_tasks = ["logo_images/*.png", "_tests/data/*.json"]
+napari_fractal_tasks = ["logo_images/*.svg", "_tests/data/*.json"]
 
 [tool.setuptools.dynamic]
 version = {attr = "napari_fractal_tasks.__init__.__version__"}

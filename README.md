@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/krentzd/napari-fractal-tasks/main/src/napari_fractal_tasks/logo_images/napari-fractal-tasks-logo.svg" width="160" alt="napari-fractal-tasks logo">
+</p>
+
 # Fractal Task Launcher
 
 [![PyPI](https://img.shields.io/pypi/v/napari-fractal-tasks.svg?color=green)](https://pypi.org/project/napari-fractal-tasks)
