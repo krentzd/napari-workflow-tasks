@@ -7,8 +7,8 @@ pytest.importorskip("napari")
 
 from napari.components import ViewerModel  # noqa: E402
 
-from napari_workflow_tasks import _task_tab  # noqa: E402
-from napari_workflow_tasks._widget import TasksQWidget  # noqa: E402
+from napari_fractal_tasks import _task_tab  # noqa: E402
+from napari_fractal_tasks._widget import TasksQWidget  # noqa: E402
 from .test_task_outputs_widget import SCHEMA  # noqa: E402
 
 COMPOUND_NP = {

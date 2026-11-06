@@ -9,7 +9,7 @@ import pytest
 from workflow_tasks_core.schema import SchemaError
 
 pytest.importorskip("qtpy")
-from napari_workflow_tasks._schema_form import (  # noqa: E402
+from napari_fractal_tasks._schema_form import (  # noqa: E402
     ListField,
     MapField,
     ObjectField,

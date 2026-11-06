@@ -6,7 +6,7 @@ import pytest
 from workflow_tasks_core.schema import SchemaError
 
 pytest.importorskip("qtpy")
-from napari_workflow_tasks._schema_form import (  # noqa: E402
+from napari_fractal_tasks._schema_form import (  # noqa: E402
     ListField,
     MapField,
     ModelListField,
@@ -89,7 +89,7 @@ def test_map_and_optional_fields(qtbot):
 def test_arrow_button(qtbot):
     from qtpy.QtWidgets import QLabel
 
-    from napari_workflow_tasks._schema_form import ArrowButton, _Collapsible
+    from napari_fractal_tasks._schema_form import ArrowButton, _Collapsible
 
     button = ArrowButton("Log")
     qtbot.addWidget(button)
@@ -113,7 +113,7 @@ def test_arrow_button_mouse_click_toggles_once(qtbot):
     """A click on the arrow or on the text opens or closes it once."""
     from qtpy.QtCore import QPoint, Qt
 
-    from napari_workflow_tasks._schema_form import ArrowButton
+    from napari_fractal_tasks._schema_form import ArrowButton
 
     button = ArrowButton("Input")
     qtbot.addWidget(button)

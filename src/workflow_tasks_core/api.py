@@ -15,7 +15,7 @@ Three classes:
 * :class:`Catalog`: the Fractal task-package catalog (search, get a package)
   and the packages installed locally.
 * :class:`Package`: one version of a task package; installs into its own
-  pixi environment (``~/.napari_workflow_tasks/envs``).
+  pixi environment (``~/.napari_fractal_tasks/envs``).
 * :class:`Task`: one task of a package: its arguments (``help``,
   ``validate``), ``run`` and, after a run, where its outputs are.
 
@@ -208,7 +208,7 @@ class Package:
     @classmethod
     def installed(cls, name: str, version: Optional[str] = None) -> "Package":
         """An installed package (newest installed version by default),
-        read from ``~/.napari_workflow_tasks/envs`` without the catalog."""
+        read from ``~/.napari_fractal_tasks/envs`` without the catalog."""
         pkg_name = normalize_package_name(name)
         versions = install.installed_versions(pkg_name)
         if not versions or (version is not None and version not in versions):
@@ -736,12 +736,12 @@ class Task:
         """Open the input images with the labels this run wrote, and its new
         images, in napari: in ``viewer`` if given, else in the current
         viewer, else in a new one. Returns the viewer. Needs
-        the napari plugin (napari-workflow-tasks) and napari installed."""
+        the napari plugin (napari-fractal-tasks) and napari installed."""
         self.outputs()  # raises if the task has not run yet
         try:
-            from napari_workflow_tasks._show import show_task
+            from napari_fractal_tasks._show import show_task
         except ImportError as e:
             raise RuntimeError(
-                "Task.show() needs napari and the napari-workflow-tasks "
+                "Task.show() needs napari and the napari-fractal-tasks "
                 f"plugin ({e})") from e
         return show_task(self, viewer)

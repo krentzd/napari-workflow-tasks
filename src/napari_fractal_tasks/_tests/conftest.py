@@ -9,7 +9,7 @@ from workflow_tasks_core import Package, api, install, paths
 
 @pytest.fixture(autouse=True)
 def _own_root(tmp_path, monkeypatch):
-    """Nothing is read from or written to the real ~/.napari_workflow_tasks:
+    """Nothing is read from or written to the real ~/.napari_fractal_tasks:
     task run files, and the installed packages the widget lists."""
     monkeypatch.setattr(paths, "TASKS_DIR", tmp_path / "tasks")
     monkeypatch.setattr(paths, "ENVS_DIR", tmp_path / "envs")

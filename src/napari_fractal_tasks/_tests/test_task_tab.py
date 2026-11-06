@@ -16,8 +16,8 @@ from ngio import create_ome_zarr_from_array  # noqa: E402
 
 from workflow_tasks_core.zarr_meta import list_tables  # noqa: E402
 
-from napari_workflow_tasks import _task_tab  # noqa: E402
-from napari_workflow_tasks._widget import TasksQWidget  # noqa: E402
+from napari_fractal_tasks import _task_tab  # noqa: E402
+from napari_fractal_tasks._widget import TasksQWidget  # noqa: E402
 
 PARALLEL = {"properties": {"zarr_url": {"type": "string"},
                            "input_ROI_table": {"type": "string",

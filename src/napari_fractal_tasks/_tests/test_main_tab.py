@@ -17,8 +17,8 @@ from workflow_tasks_core._tests.test_local_package import (  # noqa: E402
     _sdist,
 )
 
-from napari_workflow_tasks import _catalog_panel  # noqa: E402
-from napari_workflow_tasks._widget import KEY_ROLE, TasksQWidget  # noqa: E402
+from napari_fractal_tasks import _catalog_panel  # noqa: E402
+from napari_fractal_tasks._widget import KEY_ROLE, TasksQWidget  # noqa: E402
 
 TASKS = [
     {"name": "Segment", "executable_parallel": "s.py",

@@ -9,7 +9,7 @@ pytest.importorskip("napari")
 
 @pytest.fixture
 def panel(qtbot, tmp_path, monkeypatch):
-    from napari_workflow_tasks._catalog_panel import CatalogPanel
+    from napari_fractal_tasks._catalog_panel import CatalogPanel
 
     monkeypatch.setattr(paths, "ENVS_DIR", tmp_path / "envs")
     monkeypatch.setattr(paths, "CATALOG_CACHE_DIR", tmp_path / "catalog")

@@ -78,7 +78,7 @@ DEFAULT_SOURCES = [
 PREFERRED_PYTHONS = ["3.12", "3.11", "3.13", "3.10"]
 
 TIMEOUT = 30
-USER_AGENT = "napari-workflow-tasks"
+USER_AGENT = "napari-fractal-tasks"
 
 
 # --------------------------------------------------------------------------

@@ -7609,7 +7609,7 @@ packages:
   size: 354697
   timestamp: 1742433568506
 - pypi: ./
-  name: napari-workflow-tasks
+  name: napari-fractal-tasks
   requires_dist:
   - numpy
   - packaging

@@ -1,8 +1,8 @@
 """
-Where napari-workflow-tasks keeps its files.
+Where napari-fractal-tasks keeps its files.
 
-Everything lives under ``ROOT_DIR`` (``~/.napari_workflow_tasks``, or
-``$NAPARI_WORKFLOW_TASKS_ROOT``): the catalog cache, one pixi environment
+Everything lives under ``ROOT_DIR`` (``~/.napari_fractal_tasks``, or
+``$NAPARI_FRACTAL_TASKS_ROOT``): the catalog cache, one pixi environment
 per (package, version), the run files of each task and the install caches.
 
 Other modules read these globals through this module (e.g.
@@ -18,8 +18,8 @@ from typing import Optional
 
 
 ROOT_DIR = Path(
-    os.environ.get("NAPARI_WORKFLOW_TASKS_ROOT")
-    or Path.home() / ".napari_workflow_tasks"
+    os.environ.get("NAPARI_FRACTAL_TASKS_ROOT")
+    or Path.home() / ".napari_fractal_tasks"
 )
 CATALOG_CACHE_DIR = ROOT_DIR / "catalog"
 ENVS_DIR = ROOT_DIR / "envs"
