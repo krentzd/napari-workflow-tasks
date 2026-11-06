@@ -1,6 +1,7 @@
 """Covers task_packages, manifests, pixi_config, snapshot and install."""
 
 import json
+import sys
 import tomllib
 import zipfile
 
@@ -282,6 +283,8 @@ def _tarball(files: dict) -> bytes:
 
 @pytest.fixture
 def fake_pixi(isolated_home, tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("uses a Python script with a shebang line as fake pixi")
     exe = tmp_path / "pixi"
     exe.write_text(FAKE_PIXI)
     exe.chmod(0o755)
