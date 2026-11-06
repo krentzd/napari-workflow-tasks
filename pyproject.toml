@@ -7,6 +7,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [
   {name = "Daniel Krentzel", email = "dkrentzel@pm.me"},
+  {name = "Ruth Hornbachner", email = "rhornbachner@gmail.com"},
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
