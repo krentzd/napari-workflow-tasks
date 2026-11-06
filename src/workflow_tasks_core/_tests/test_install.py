@@ -136,7 +136,9 @@ def test_candidate_pythons():
 
 
 def test_pick_wheel_filters_platform_and_python():
-    linux = "a-1.0-cp311-cp311-linux_x86_64.whl"
+    # a platform no test machine has: a linux_x86_64 wheel would be
+    # installable on Linux CI runners
+    foreign = "a-1.0-cp311-cp311-linux_s390x.whl"
     host = [
         w for w in ("a-1.0-cp311-cp311-macosx_11_0_arm64.whl",
                     "a-1.0-cp311-cp311-manylinux_2_17_x86_64.whl",
@@ -145,14 +147,13 @@ def test_pick_wheel_filters_platform_and_python():
         if task_packages.wheel_is_compatible(w, "3.11")
     ]
     assert len(host) == 1  # exactly one matches the machine running tests
-    assert task_packages._pick_wheel([linux], python="3.11") is None or \
-        pixi_config.current_pixi_platform() == "linux-64"
-    assert task_packages._pick_wheel([linux, host[0]], python="3.11") == host[0]
-    assert task_packages._pick_wheel([linux, host[0]], python="3.12") is None
+    assert task_packages._pick_wheel([foreign], python="3.11") is None
+    assert task_packages._pick_wheel([foreign, host[0]], python="3.11") == host[0]
+    assert task_packages._pick_wheel([foreign, host[0]], python="3.12") is None
     # listing: pure first, then host-compatible, then anything
     pure = "a-1.0-py3-none-any.whl"
     assert task_packages._pick_wheel([host[0], pure]) == pure
-    assert task_packages._pick_wheel([linux, host[0]]) == host[0]
+    assert task_packages._pick_wheel([foreign, host[0]]) == host[0]
     assert task_packages._pick_wheel(["a-1.0.tar.gz"]) is None
 
 

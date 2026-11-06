@@ -17,11 +17,11 @@ from workflow_tasks_core.runner import (
 )
 
 SCRIPT = r"""
-import argparse, json, sys
+import argparse, json, os, sys
 p = argparse.ArgumentParser(); p.add_argument("--args-json"); p.add_argument("--out-json")
 a = p.parse_args(); args = json.load(open(a.args_json))
 print("ARGS", json.dumps(args, sort_keys=True))
-mode = sys.argv[0].split("/")[-1]
+mode = os.path.basename(sys.argv[0])
 if mode == "init.py":
     items = [{"zarr_url": u, "init_args": {"ref": args["zarr_urls"][0]}} for u in args["zarr_urls"][1:]]
     json.dump({"parallelization_list": items + items}, open(a.out_json, "w"))

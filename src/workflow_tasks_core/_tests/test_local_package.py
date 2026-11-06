@@ -3,6 +3,7 @@
 import io
 import json
 import tarfile
+import tomllib
 
 import pytest
 
@@ -100,7 +101,9 @@ def test_package_from_file(sdist):
 
 def test_installed_from_its_path(sdist):
     source = pixi_config.resolve_install_source(local_package(sdist), "1.0")
-    assert source.dep_fields == [f'path = "{sdist.resolve()}"']
+    # a TOML string: backslashes of a Windows path are escaped
+    [field] = source.dep_fields
+    assert tomllib.loads(field) == {"path": str(sdist.resolve())}
 
 
 def test_rebuilt_archive_is_installed_again(sdist):

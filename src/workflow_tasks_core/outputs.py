@@ -123,20 +123,23 @@ def expected_image_urls(args: dict, props: dict, zarr_url: str) -> list[str]:
     if _arg(args, props, 'overwrite_input'):
         return []
     zarr_url = zarr_url.rstrip('/')
-    parent, image = os.path.split(zarr_url)
+    image = os.path.split(zarr_url)[1]
+    # the parent with the separator the input used: os.path.join would put
+    # a backslash into a forward-slash URL on Windows
+    prefix = zarr_url[:len(zarr_url) - len(image)]
     stem, ext = os.path.splitext(image)
     urls = []
 
     suffix = _arg(args, props, 'output_image_suffix')
     if isinstance(suffix, str) and suffix.strip():
         suffix = suffix.strip().replace(' ', '_')
-        urls.append(os.path.join(parent, f'{stem}_{suffix}{ext}'))
+        urls.append(f'{prefix}{stem}_{suffix}{ext}')
 
     template = _arg(args, props, 'output_image_name')
     if isinstance(template, str) and template:
         name = _fill(template, image_name=image)
         if name:
-            urls.append(os.path.join(parent, name))
+            urls.append(prefix + name)
     return urls
 
 

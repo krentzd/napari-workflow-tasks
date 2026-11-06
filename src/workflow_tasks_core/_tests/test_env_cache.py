@@ -5,6 +5,7 @@ import errno
 import json
 import os
 import subprocess
+import sys
 import tomllib
 
 import pytest
@@ -73,6 +74,8 @@ def test_dedup_store_and_relink(tmp_path):
     assert (st.already_linked, st.relinked, st.added) == (2, 0, 0)
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows files have no executable bit to differ")
 def test_dedup_mode_mismatch_not_relinked(tmp_path):
     store = tmp_path / "store"
     a = _env(tmp_path / "a", {"libx.so": b"x"})
