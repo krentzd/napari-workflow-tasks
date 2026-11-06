@@ -7,6 +7,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [
   {name = "Daniel Krentzel", email = "dkrentzel@pm.me"},
+  {name = "Ruth Hornbachner", email = "rhornbachner@gmail.com"},
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
@@ -61,7 +62,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "*" = ["*.yaml"]
-napari_fractal_tasks = ["logo_images/*.png", "_tests/data/*.json"]
+napari_fractal_tasks = ["logo_images/*.svg", "_tests/data/*.json"]
 
 [tool.setuptools.dynamic]
 version = {attr = "napari_fractal_tasks.__init__.__version__"}
