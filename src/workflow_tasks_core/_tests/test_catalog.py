@@ -69,7 +69,9 @@ def test_choose_python():
 @pytest.mark.parametrize("kind", ["pypi", "github"])
 def test_pixi_manifest_pins_version(isolated_home, kind):
     pkg = _pkg(kind)
-    path = pixi_config.write_pixi_manifest(pkg, "1.2.0", ["fractal-tasks"], ">=3.11,<3.12")
+    path = pixi_config.write_pixi_manifest(
+        pkg, "1.2.0", ["fractal-tasks"], ">=3.11,<3.12", rich_platforms=False
+    )
     data = tomllib.loads(path.read_text())
     dep = data["pypi-dependencies"]["my-tasks"]
     if kind == "pypi":
@@ -84,7 +86,8 @@ def test_pixi_manifest_pins_version(isolated_home, kind):
 def test_pixi_manifest_with_pins(isolated_home):
     pkg = _pkg()
     path = pixi_config.write_pixi_manifest(
-        pkg, "1.2.0", [], None, pins=["cellpose<4.2", "numpy==1.26.4"]
+        pkg, "1.2.0", [], None, pins=["cellpose<4.2", "numpy==1.26.4"],
+        rich_platforms=False,
     )
     deps = tomllib.loads(path.read_text())["pypi-dependencies"]
     assert deps["cellpose"] == "<4.2"
@@ -101,7 +104,8 @@ def test_pixi_manifest_with_skipped_packages(isolated_home, monkeypatch):
     monkeypatch.setattr(pixi_config.sys, "platform", "darwin")
     pkg = _pkg()
     path = pixi_config.write_pixi_manifest(
-        pkg, "1.2.0", [], None, skip=["cupy-cuda12x"], no_build=["pyqt6"]
+        pkg, "1.2.0", [], None, skip=["cupy-cuda12x"], no_build=["pyqt6"],
+        rich_platforms=False,
     )
     options = tomllib.loads(path.read_text())["pypi-options"]
     assert options["no-build"] == ["pyqt6"]
