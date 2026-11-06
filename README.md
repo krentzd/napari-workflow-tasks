@@ -1,4 +1,11 @@
-# napari-fractal-tasks
+# Fractal Task Launcher
+
+[![PyPI](https://img.shields.io/pypi/v/napari-fractal-tasks.svg?color=green)](https://pypi.org/project/napari-fractal-tasks)
+[![Python Version](https://img.shields.io/pypi/pyversions/napari-fractal-tasks.svg?color=green)](https://pypi.org/project/napari-fractal-tasks)
+[![Downloads](https://static.pepy.tech/badge/napari-fractal-tasks)](https://pepy.tech/project/napari-fractal-tasks)
+[![License MIT](https://img.shields.io/github/license/krentzd/napari-fractal-tasks?color=green)](https://github.com/krentzd/napari-fractal-tasks/raw/main/LICENSE)
+[![tests](https://github.com/krentzd/napari-fractal-tasks/actions/workflows/test_and_deploy.yml/badge.svg?branch=main)](https://github.com/krentzd/napari-fractal-tasks/actions/workflows/test_and_deploy.yml)
+[![napari hub](https://img.shields.io/endpoint?url=https://api.napari-hub.org/shields/napari-fractal-tasks)](https://napari-hub.org/plugins/napari-fractal-tasks)
 
 A [napari](https://napari.org/stable/index.html) plugin to install and run [Fractal](https://fractal-analytics-platform.github.io/) tasks locally on [OME-Zarr](https://ngff.openmicroscopy.org/) images. Tasks can either be installed from the [Fractal task catalog]( https://fractal-analytics-platform.github.io/fractal_tasks/) or from tarball files (`.tar.gz`). 
 
